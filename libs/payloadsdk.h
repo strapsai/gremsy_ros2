@@ -38,7 +38,7 @@ static uint8_t GIMBAL_COMPONENT_ID = MAV_COMP_ID_GIMBAL;  // auto update when go
 
 static char *payload_uart_port = (char*)"/dev/ttyUSB0";
 static int payload_uart_baud = 115200;
-static char *udp_ip_target = (char*)"192.168.55.1";   // This is an ip address of the payload
+static char *udp_ip_target = (char*)"192.168.70.21";   //"192.168.55.1"; // This is an ip address of the payload
 static int udp_port_target = 14566;                     // Do not change
 
 typedef struct{
