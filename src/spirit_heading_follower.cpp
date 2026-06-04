@@ -8,7 +8,6 @@
 #include "payloadSdkInterface.h"
 #include "geometry_msgs/msg/vector3.hpp"
 
-#include <humanflow_msgs/msg/human_flow_array.hpp>
 
 using namespace std::chrono_literals;
 
@@ -33,8 +32,6 @@ public:
 
     move_gimbal_angle_sub_ = this->create_subscription<geometry_msgs::msg::Vector3>(
       "move_gimbal_angle", 10, std::bind(&MyPublisher::move_gimbal_angle_mode_callback, this, std::placeholders::_1));
-    humanflow_sub_ = this->create_subscription<humanflow_msgs::msg::HumanFlowArray>(
-      "/drone1/demo/humanflow", 10, std::bind(&MyPublisher::humanflow_callback, this, std::placeholders::_1));
     my_payload = new PayloadSdkInterface(s_conn);
     my_payload->sdkInitConnection();
 
@@ -160,7 +157,6 @@ private:
   // Subscriptions:
 
   rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr move_gimbal_angle_sub_;
-  rclcpp::Subscription<humanflow_msgs::msg::HumanFlowArray>::SharedPtr humanflow_sub_;
 
   void move_gimbal_angle_mode_callback(const geometry_msgs::msg::Vector3 & msg) const
   {
@@ -168,60 +164,6 @@ private:
     my_payload->setGimbalSpeed(msg.x, msg.y, msg.z, INPUT_ANGLE);
   }
 
-  void humanflow_callback(const humanflow_msgs::msg::HumanFlowArray & msg) 
-  {
-    if (msg.humanflows.size() > 0){
-
-        // RCLCPP_INFO(this->get_logger(),
-        //     "bbox center=(%.1f, %.1f, theta=%.2f) size=(%.1f, %.1f)",
-        //     msg.humanflows[0].bbox.center.position.x,   // or bbox.center.x depending on your version
-        //     msg.humanflows[0].bbox.center.position.y,
-        //     msg.humanflows[0].bbox.center.theta,
-        //     msg.humanflows[0].bbox.size_x,
-        //     msg.humanflows[0].bbox.size_y
-        // );
-
-        float x = msg.humanflows[0].bbox.center.position.x;
-        float y = msg.humanflows[0].bbox.center.position.y;
-        float w = msg.humanflows[0].bbox.size_x;
-        float h = msg.humanflows[0].bbox.size_y;
-
-        // 1920:1080 is what is usually used in the ui_demo, and 640:480 is the resized image in humanflow, so we do the following
-        float hf_w = 640; // humanflow width
-        float hf_h = 480;
-        float gr_w = 1920;
-        float gr_h = 1080; // gremsy height
-        x = x * gr_w / hf_w;
-        y = y * gr_h / hf_h;
-        w = w * gr_w / hf_w;
-        h = h * gr_h / hf_h;
-
-        // // 1. First, enable tracking mode
-        // my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_TRACKING_MODE, 1, PARAM_TYPE_UINT32);
-
-        // // 2. Then set the tracking to active/enabled
-        // my_payload->setPayloadObjectTrackingMode(1);  // or whatever value enables tracking
-
-        // 3. Finally, set the tracking position (the click)
-        my_payload->setPayloadObjectTrackingPosition(x, y, w, h);
-
-        if (x < gr_w/2 + 20 &&
-            x > gr_w/2 - 20 &&
-            y < gr_h/2 + 20 &&
-            y > gr_h/2 - 20) {
-              this->current_LRF_ID = msg.humanflows[0].tracking_id;
-            }
-        else{
-          this->current_LRF_ID = -1;
-        }
-        
-    }
-    else {
-        // RCLCPP_ERROR(this->get_logger(), "zeruh:");
-        this->current_LRF_ID = -1;
-    }
-    // RCLCPP_ERROR(this->get_logger(), "size: %zu", msg.humanflows.size());
-  }
 
   rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gimbal_orientation_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_;
