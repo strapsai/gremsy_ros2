@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <sstream>
@@ -7,6 +8,10 @@
 #include "std_msgs/msg/string.hpp"
 #include "payloadSdkInterface.h"
 #include "geometry_msgs/msg/vector3.hpp"
+#include "drone_msgs/msg/command_gimbal.hpp"
+#include "tf2/LinearMath/Matrix3x3.h"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 
 using namespace std::chrono_literals;
@@ -32,6 +37,11 @@ public:
 
     move_gimbal_angle_sub_ = this->create_subscription<geometry_msgs::msg::Vector3>(
       "move_gimbal_angle", 10, std::bind(&MyPublisher::move_gimbal_angle_mode_callback, this, std::placeholders::_1));
+
+    this->declare_parameter<std::string>("gimbal_command_topic", "/spiritnx3/gimbal/command");
+    const auto gimbal_command_topic = this->get_parameter("gimbal_command_topic").as_string();
+    gimbal_command_sub_ = this->create_subscription<drone_msgs::msg::CommandGimbal>(
+      gimbal_command_topic, 10, std::bind(&MyPublisher::gimbal_command_callback, this, std::placeholders::_1));
     my_payload = new PayloadSdkInterface(s_conn);
     my_payload->sdkInitConnection();
 
@@ -157,11 +167,36 @@ private:
   // Subscriptions:
 
   rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr move_gimbal_angle_sub_;
+  rclcpp::Subscription<drone_msgs::msg::CommandGimbal>::SharedPtr gimbal_command_sub_;
 
   void move_gimbal_angle_mode_callback(const geometry_msgs::msg::Vector3 & msg) const
   {
     RCLCPP_INFO(this->get_logger(),"x: %f, y: %f, z: %f", msg.x, msg.y, msg.z);
     my_payload->setGimbalSpeed(msg.x, msg.y, msg.z, INPUT_ANGLE);
+  }
+
+  void gimbal_command_callback(const drone_msgs::msg::CommandGimbal & msg) const
+  {
+    const auto & cmd = msg.gimbal_command;
+    if (cmd.command_type != drone_msgs::msg::GimbalCommand::ORIENTATION) {
+      return;
+    }
+
+    tf2::Quaternion q;
+    tf2::fromMsg(cmd.orientation, q);
+    q.normalize();
+
+    double roll_rad = 0.0;
+    double pitch_rad = 0.0;
+    double yaw_rad = 0.0;
+    tf2::Matrix3x3(q).getRPY(roll_rad, pitch_rad, yaw_rad);
+
+    const float roll_deg = static_cast<float>(roll_rad * 180.0 / M_PI);
+    const float pitch_deg = static_cast<float>(pitch_rad * 180.0 / M_PI);
+    const float yaw_deg = static_cast<float>(yaw_rad * 180.0 / M_PI);
+
+    RCLCPP_INFO(this->get_logger(), "roll: %f, pitch: %f, yaw: %f", roll_deg, pitch_deg, yaw_deg);
+    my_payload->setGimbalSpeed(pitch_deg, roll_deg, yaw_deg, INPUT_ANGLE);
   }
 
 

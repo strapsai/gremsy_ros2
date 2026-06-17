@@ -83,6 +83,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(drone_msgs REQUIRED)
 
 
 
@@ -101,7 +102,7 @@ include_directories(${PAYLOADSDKLIB_DIR}
 
 
 add_executable(heading_follower src/spirit_heading_follower.cpp ${SOURCES})
-ament_target_dependencies(heading_follower rclcpp std_msgs geometry_msgs sensor_msgs nav_msgs tf2 tf2_geometry_msgs )
+ament_target_dependencies(heading_follower rclcpp std_msgs geometry_msgs sensor_msgs nav_msgs tf2 tf2_geometry_msgs drone_msgs)
 
 target_link_libraries(heading_follower
                     PayloadSDK
