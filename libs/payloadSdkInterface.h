@@ -63,7 +63,7 @@ enum {
     PARAM_COUNT
 };
 
-struct {
+inline struct payloadParam_t {
         const uint8_t index;
         const char *id;
         float value;

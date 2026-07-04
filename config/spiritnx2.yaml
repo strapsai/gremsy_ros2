@@ -1,0 +1,8 @@
+# Per-drone config for spiritnx2. See spiritnx3.yaml for field docs.
+/**:
+  ros__parameters:
+    gremsy_ip: "192.168.70.22"
+    gremsy_port: 14566
+    gimbal_command_topic: "/spiritnx2/gimbal/command"
+    gimbal_orientation_topic: "/gimbal_orientation"
+    move_gimbal_angle_topic: "/move_gimbal_angle"

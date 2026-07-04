@@ -1,0 +1,15 @@
+# Per-drone config for spiritnx3. Selected by spirit_triage.launch.py from the
+# drone name (ROBOT_NAME / launch arg). Applies to spirit_driver and ui_demo_ros2
+# (/** matches any node name/namespace).
+#
+# The *_topic entries are the pre-existing, cross-system interface topics. They
+# are ABSOLUTE (leading '/') so they are NOT placed under the /<drone>/gremsy
+# namespace -- gimbal_command comes from the basestation, and the bag logs
+# gimbal_orientation / move_gimbal_angle at these names.
+/**:
+  ros__parameters:
+    gremsy_ip: "192.168.70.23"
+    gremsy_port: 14566
+    gimbal_command_topic: "/spiritnx3/gimbal/command"
+    gimbal_orientation_topic: "/gimbal_orientation"
+    move_gimbal_angle_topic: "/move_gimbal_angle"
