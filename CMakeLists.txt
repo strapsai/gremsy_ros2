@@ -63,6 +63,7 @@ find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(drone_msgs REQUIRED)
+find_package(lion_ros2_bridge REQUIRED)
 
 pkg_check_modules(JSONCPP jsoncpp)
 find_package(CURL REQUIRED)
@@ -81,7 +82,7 @@ include_directories(${PAYLOADSDKLIB_DIR}
 # --------------------------------------------------------------------------
 add_executable(spirit_driver src/spirit_driver.cpp)
 ament_target_dependencies(spirit_driver
-  rclcpp std_msgs geometry_msgs sensor_msgs nav_msgs tf2 tf2_geometry_msgs drone_msgs)
+  rclcpp std_msgs geometry_msgs sensor_msgs nav_msgs tf2 tf2_geometry_msgs drone_msgs lion_ros2_bridge)
 target_link_libraries(spirit_driver
                     PayloadSDK
                     ${CMAKE_THREAD_LIBS_INIT}
