@@ -15,7 +15,9 @@
 // can be remapped at launch without rebuilding.
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -35,6 +37,9 @@
 #include "std_msgs/msg/string.hpp"
 #include "geometry_msgs/msg/vector3.hpp"
 #include "drone_msgs/msg/command_gimbal.hpp"
+#include "lion_ros2_bridge/msg/position.hpp"
+#include "lion_ros2_bridge/msg/gimbal_state.hpp"
+#include "lion_ros2_bridge/msg/lrf_tracking_data.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -71,9 +76,18 @@ public:
       this->declare_parameter<std::string>("gimbal_orientation_topic", "/gimbal_orientation");
     move_gimbal_angle_topic_ =
       this->declare_parameter<std::string>("move_gimbal_angle_topic", "/move_gimbal_angle");
+    robot_name_ = this->declare_parameter<std::string>("drone", "spiritnx3");
 
     // ---- Telemetry publishers ----
     gimbal_orientation_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(gimbal_orientation_topic, 10);
+    // Fused payload GPS + gimbal attitude, stamped on the drone clock, for reid
+    // ingestion (relative name -> /<ns>/gremsy/position; reader keys on ".../position").
+    position_pub_ = this->create_publisher<lion_ros2_bridge::msg::Position>("position", 10);
+    // Gimbal state carries the EO zoom_level UFM needs to select camera intrinsics
+    // (relative name -> /<ns>/gremsy/gimbal_state). Modeled on the lion gimbal/state.
+    gimbal_state_pub_ = this->create_publisher<lion_ros2_bridge::msg::GimbalState>("gimbal_state", 10);
+    // LRF range -> lrf_samples; UFM derives ground_z from it (relative -> /<ns>/gremsy/lrf).
+    lrf_pub_ = this->create_publisher<lion_ros2_bridge::msg::LrfTrackingData>("lrf", 10);
     cam_param_pub_ = this->create_publisher<std_msgs::msg::String>(TLM_CAM_PARAM, 10);
     stream_uri_pub_ = this->create_publisher<std_msgs::msg::String>(TLM_STREAM_URI, rclcpp::QoS(1).transient_local());
     has_video_pub_ = this->create_publisher<std_msgs::msg::Bool>(TLM_HAS_VIDEO, rclcpp::QoS(1).transient_local());
@@ -109,6 +123,12 @@ public:
     my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_RC_MODE, PAYLOAD_CAMERA_RC_MODE_STANDARD, PARAM_TYPE_UINT32);
 
     request_param_rates();
+
+    // Publish the fused Position + GimbalState at 10 Hz (matches the Lion cadence).
+    position_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(100),
+      [this]() { publish_position(); publish_gimbal_state(); publish_lrf(); });
+
     RCLCPP_INFO(this->get_logger(), "spirit_driver ready; full payload API exposed on ROS2.");
   }
 
@@ -133,6 +153,11 @@ private:
         v.y = param[0];
         v.z = param[2];
         gimbal_orientation_pub_->publish(v);
+        // Cache for the fused /position message.
+        roll_deg_.store(param[1]);
+        pitch_deg_.store(param[0]);
+        yaw_deg_.store(param[2]);
+        have_orientation_.store(true);
         break;
       }
       case PAYLOAD_PARAMS: {
@@ -143,6 +168,12 @@ private:
           m.data = param[1];
           it->second->publish(m);
         }
+        // Cache payload GPS for the fused /position message.
+        if (idx == PARAM_PAYLOAD_GPS_LAT) { pay_lat_.store(param[1]); have_lat_.store(true); }
+        else if (idx == PARAM_PAYLOAD_GPS_LON) { pay_lon_.store(param[1]); have_lon_.store(true); }
+        else if (idx == PARAM_PAYLOAD_GPS_ALT) { pay_alt_.store(param[1]); have_alt_.store(true); }
+        else if (idx == PARAM_EO_ZOOM_LEVEL) { eo_zoom_.store(param[1]); have_zoom_.store(true); }
+        else if (idx == PARAM_LRF_RANGE) { lrf_range_.store(param[1]); have_lrf_.store(true); }
         break;
       }
       case PAYLOAD_CAM_STORAGE_INFO: {
@@ -190,6 +221,70 @@ private:
       m.data = param_char;
       stream_uri_pub_->publish(m);
     }
+  }
+
+  // Fuse the latest payload GPS + gimbal attitude into a stamped
+  // lion_ros2_bridge/Position. Runs on the ROS timer (drone clock) so the stamp
+  // aligns with the EO frames the reid mapper interpolates against.
+  void publish_position()
+  {
+    if (!(have_lat_.load() && have_lon_.load() && have_alt_.load())) {
+      return;  // wait for a full payload GPS fix
+    }
+    lion_ros2_bridge::msg::Position msg;
+    msg.header.stamp = this->now();
+    msg.header.frame_id = "gremsy";
+    msg.vehicle_id = robot_name_;
+    msg.lla.latitude_deg = pay_lat_.load();
+    msg.lla.longitude_deg = pay_lon_.load();
+    msg.lla.altitude_m = pay_alt_.load();
+    if (have_orientation_.load()) {
+      msg.orientation.roll_deg = static_cast<float>(roll_deg_.load());
+      msg.orientation.pitch_deg = static_cast<float>(pitch_deg_.load());
+      msg.orientation.yaw_deg = static_cast<float>(yaw_deg_.load());
+    }
+    position_pub_->publish(msg);
+  }
+
+  // Publish gimbal telemetry (drone-clock stamped) so the reader writes
+  // gimbal_samples; UFM reads zoom_level from there to select camera intrinsics.
+  // Only the zoom_level is consumed by UFM today; angles are filled for context.
+  void publish_gimbal_state()
+  {
+    if (!have_zoom_.load()) {
+      return;  // wait for a real EO zoom so gimbal_samples never carries a bogus default
+    }
+    lion_ros2_bridge::msg::GimbalState msg;
+    msg.header.stamp = this->now();
+    msg.header.frame_id = "gremsy";
+    msg.vehicle_id = robot_name_;
+    msg.gimbal_id = "gremsy";
+    if (have_orientation_.load()) {
+      msg.pan_deg = static_cast<float>(yaw_deg_.load());
+      msg.tilt_deg = static_cast<float>(pitch_deg_.load());
+      msg.roll_deg = static_cast<float>(roll_deg_.load());
+    }
+    msg.zoom_level = static_cast<float>(eo_zoom_.load());
+    msg.mode = 0;  // UNSPECIFIED
+    gimbal_state_pub_->publish(msg);
+  }
+
+  // Publish LRF range (drone-clock stamped) -> reader writes lrf_samples; UFM
+  // derives ground_z from cruise-window altitude + LRF range.
+  void publish_lrf()
+  {
+    if (!have_lrf_.load()) {
+      return;  // wait for a real LRF reading
+    }
+    lion_ros2_bridge::msg::LrfTrackingData msg;
+    msg.header.stamp = this->now();
+    msg.header.frame_id = "gremsy";
+    msg.vehicle_id = robot_name_;
+    const double range = lrf_range_.load();
+    msg.lrf_range_meters = static_cast<float>(range);
+    msg.lrf_data_valid = (range > 0.0);
+    if (have_zoom_.load()) msg.zoom_level = static_cast<float>(eo_zoom_.load());
+    lrf_pub_->publish(msg);
   }
 
   void request_param_rates()
@@ -372,6 +467,15 @@ private:
   std::string move_gimbal_angle_topic_;
 
   rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gimbal_orientation_pub_;
+  rclcpp::Publisher<lion_ros2_bridge::msg::Position>::SharedPtr position_pub_;
+  rclcpp::Publisher<lion_ros2_bridge::msg::GimbalState>::SharedPtr gimbal_state_pub_;
+  rclcpp::Publisher<lion_ros2_bridge::msg::LrfTrackingData>::SharedPtr lrf_pub_;
+  rclcpp::TimerBase::SharedPtr position_timer_;
+  std::string robot_name_;
+  std::atomic<double> pay_lat_{0.0}, pay_lon_{0.0}, pay_alt_{0.0};
+  std::atomic<double> roll_deg_{0.0}, pitch_deg_{0.0}, yaw_deg_{0.0};
+  std::atomic<double> eo_zoom_{1.0}, lrf_range_{0.0};
+  std::atomic<bool> have_lat_{false}, have_lon_{false}, have_alt_{false}, have_orientation_{false}, have_zoom_{false}, have_lrf_{false};
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr cam_param_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr stream_uri_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr has_video_pub_;
