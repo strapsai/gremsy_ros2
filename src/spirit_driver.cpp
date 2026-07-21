@@ -36,6 +36,7 @@
 #include "std_msgs/msg/int32_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "geometry_msgs/msg/vector3.hpp"
+#include "sensor_msgs/msg/nav_sat_fix.hpp"
 #include "drone_msgs/msg/command_gimbal.hpp"
 #include "lion_ros2_bridge/msg/position.hpp"
 #include "lion_ros2_bridge/msg/gimbal_state.hpp"
@@ -77,6 +78,18 @@ public:
     move_gimbal_angle_topic_ =
       this->declare_parameter<std::string>("move_gimbal_angle_topic", "/move_gimbal_angle");
     robot_name_ = this->declare_parameter<std::string>("drone", "spiritnx3");
+    // Drone FC GPS (mavros NavSatFix). The payload GPS params are the FC
+    // solution forwarded at ~1 Hz and ~0.7 s stale; prefer the FC topic
+    // directly, payload as fallback. Override per-drone in config/<drone>.yaml.
+    const std::string fc_gps_topic = this->declare_parameter<std::string>(
+      "fc_gps_topic", "/robot_3/interface/mavros/global_position/global");
+    fc_gps_max_age_sec_ = this->declare_parameter<double>("fc_gps_max_age_sec", 1.0);
+    // NavSatFix altitude is ellipsoidal; Position.lla is MSL. FC fallback
+    // uses alt + geoid_offset_m (site geoid undulation).
+    geoid_offset_m_ = this->declare_parameter<double>("geoid_offset_m", 0.0);
+    // LRF validity gate: exclude on-ground readings and no-return sentinels.
+    lrf_valid_min_m_ = this->declare_parameter<double>("lrf_valid_min_m", 5.0);
+    lrf_valid_max_m_ = this->declare_parameter<double>("lrf_valid_max_m", 300.0);
 
     // ---- Telemetry publishers ----
     gimbal_orientation_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(gimbal_orientation_topic, 10);
@@ -102,6 +115,11 @@ public:
       std::transform(id.begin(), id.end(), id.begin(), [](unsigned char c) { return std::tolower(c); });
       param_pubs_[p.index] = this->create_publisher<std_msgs::msg::Float64>(std::string(TLM_PARAMS_PREFIX) + id, 10);
     }
+
+    // FC GPS subscription (best-effort sensor QoS, matches mavros publishers).
+    fc_gps_sub_ = this->create_subscription<sensor_msgs::msg::NavSatFix>(
+      fc_gps_topic, rclcpp::SensorDataQoS(),
+      std::bind(&SpiritDriver::onFcGps, this, std::placeholders::_1));
 
     // ---- Command subscriptions (one per payload feature) ----
     setup_command_subscriptions();
@@ -223,21 +241,56 @@ private:
     }
   }
 
-  // Fuse the latest payload GPS + gimbal attitude into a stamped
-  // lion_ros2_bridge/Position. Runs on the ROS timer (drone clock) so the stamp
-  // aligns with the EO frames the reid mapper interpolates against.
+  void onFcGps(const sensor_msgs::msg::NavSatFix& msg)
+  {
+    if (msg.status.status < sensor_msgs::msg::NavSatStatus::STATUS_FIX ||
+        !is_real_fix(msg.latitude, msg.longitude)) {
+      fc_fix_.store(false);
+      return;
+    }
+    fc_lat_.store(msg.latitude);
+    fc_lon_.store(msg.longitude);
+    fc_alt_.store(msg.altitude);
+    fc_rx_ns_.store(this->now().nanoseconds());
+    fc_fix_.store(true);
+  }
+
+  // (0, 0) is the SDK's pre-fix placeholder, never a real position.
+  static bool is_real_fix(double lat, double lon)
+  {
+    return std::fabs(lat) > 1e-6 || std::fabs(lon) > 1e-6;
+  }
+
+  // Fuse the freshest GPS + gimbal attitude into a stamped
+  // lion_ros2_bridge/Position. lat/lon: FC when fixed and fresh, else the
+  // payload copy. alt: payload MSL when available, else FC + geoid_offset_m.
   void publish_position()
   {
-    if (!(have_lat_.load() && have_lon_.load() && have_alt_.load())) {
-      return;  // wait for a full payload GPS fix
+    const bool fc_fresh = fc_fix_.load() &&
+      (this->now().nanoseconds() - fc_rx_ns_.load()) < static_cast<int64_t>(fc_gps_max_age_sec_ * 1e9);
+    const bool pay_ok = have_lat_.load() && have_lon_.load() &&
+      is_real_fix(pay_lat_.load(), pay_lon_.load());
+    if (!fc_fresh && !pay_ok) {
+      return;  // no usable fix from either source yet
     }
     lion_ros2_bridge::msg::Position msg;
     msg.header.stamp = this->now();
     msg.header.frame_id = "gremsy";
     msg.vehicle_id = robot_name_;
-    msg.lla.latitude_deg = pay_lat_.load();
-    msg.lla.longitude_deg = pay_lon_.load();
-    msg.lla.altitude_m = pay_alt_.load();
+    if (fc_fresh) {
+      msg.lla.latitude_deg = fc_lat_.load();
+      msg.lla.longitude_deg = fc_lon_.load();
+    } else {
+      msg.lla.latitude_deg = pay_lat_.load();
+      msg.lla.longitude_deg = pay_lon_.load();
+    }
+    if (have_alt_.load() && pay_ok) {
+      msg.lla.altitude_m = pay_alt_.load();               // already MSL
+    } else if (fc_fresh) {
+      msg.lla.altitude_m = fc_alt_.load() + geoid_offset_m_;
+    } else {
+      return;  // no usable altitude
+    }
     if (have_orientation_.load()) {
       msg.orientation.roll_deg = static_cast<float>(roll_deg_.load());
       msg.orientation.pitch_deg = static_cast<float>(pitch_deg_.load());
@@ -282,7 +335,7 @@ private:
     msg.vehicle_id = robot_name_;
     const double range = lrf_range_.load();
     msg.lrf_range_meters = static_cast<float>(range);
-    msg.lrf_data_valid = (range > 0.0);
+    msg.lrf_data_valid = (range > lrf_valid_min_m_ && range < lrf_valid_max_m_);
     if (have_zoom_.load()) msg.zoom_level = static_cast<float>(eo_zoom_.load());
     lrf_pub_->publish(msg);
   }
@@ -472,6 +525,12 @@ private:
   rclcpp::Publisher<lion_ros2_bridge::msg::LrfTrackingData>::SharedPtr lrf_pub_;
   rclcpp::TimerBase::SharedPtr position_timer_;
   std::string robot_name_;
+  rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr fc_gps_sub_;
+  std::atomic<double> fc_lat_{0.0}, fc_lon_{0.0}, fc_alt_{0.0};
+  std::atomic<int64_t> fc_rx_ns_{0};
+  std::atomic<bool> fc_fix_{false};
+  double fc_gps_max_age_sec_{1.0}, geoid_offset_m_{0.0};
+  double lrf_valid_min_m_{5.0}, lrf_valid_max_m_{300.0};
   std::atomic<double> pay_lat_{0.0}, pay_lon_{0.0}, pay_alt_{0.0};
   std::atomic<double> roll_deg_{0.0}, pitch_deg_{0.0}, yaw_deg_{0.0};
   std::atomic<double> eo_zoom_{1.0}, lrf_range_{0.0};
