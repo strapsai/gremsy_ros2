@@ -84,6 +84,7 @@ public:
     const std::string fc_gps_topic = this->declare_parameter<std::string>(
       "fc_gps_topic", "/robot_3/interface/mavros/global_position/global");
     fc_gps_max_age_sec_ = this->declare_parameter<double>("fc_gps_max_age_sec", 1.0);
+    attitude_max_age_sec_ = this->declare_parameter<double>("attitude_max_age_sec", 1.0);
     // LRF validity gate: exclude on-ground readings and no-return sentinels.
     lrf_valid_min_m_ = this->declare_parameter<double>("lrf_valid_min_m", 5.0);
     lrf_valid_max_m_ = this->declare_parameter<double>("lrf_valid_max_m", 300.0);
@@ -172,6 +173,7 @@ private:
         roll_deg_.store(param[1]);
         pitch_deg_.store(param[0]);
         yaw_deg_.store(param[2]);
+        ori_rx_ns_.store(this->now().nanoseconds());
         have_orientation_.store(true);
         break;
       }
@@ -262,12 +264,17 @@ private:
   // no payload fallback, so the trajectory can never mix sources). Altitude
   // passes through as reported by fc_gps_topic (ellipsoidal for mavros
   // global_position/global; switch to the FC AMSL topic once the interface
-  // exposes it). Nothing is published while the FC fix is stale or absent.
+  // exposes it). Both the FC fix and the gimbal attitude must be present and
+  // fresh — nothing is published otherwise (no 0,0,0 orientation defaults, no
+  // stale attitude held past attitude_max_age_sec).
   void publish_position()
   {
+    const int64_t now_ns = this->now().nanoseconds();
     const bool fc_fresh = fc_fix_.load() &&
-      (this->now().nanoseconds() - fc_rx_ns_.load()) < static_cast<int64_t>(fc_gps_max_age_sec_ * 1e9);
-    if (!fc_fresh) {
+      (now_ns - fc_rx_ns_.load()) < static_cast<int64_t>(fc_gps_max_age_sec_ * 1e9);
+    const bool ori_fresh = ori_rx_ns_.load() != 0 &&
+      (now_ns - ori_rx_ns_.load()) < static_cast<int64_t>(attitude_max_age_sec_ * 1e9);
+    if (!fc_fresh || !ori_fresh) {
       return;
     }
     lion_ros2_bridge::msg::Position msg;
@@ -277,11 +284,9 @@ private:
     msg.lla.latitude_deg = fc_lat_.load();
     msg.lla.longitude_deg = fc_lon_.load();
     msg.lla.altitude_m = fc_alt_.load();
-    if (have_orientation_.load()) {
-      msg.orientation.roll_deg = static_cast<float>(roll_deg_.load());
-      msg.orientation.pitch_deg = static_cast<float>(pitch_deg_.load());
-      msg.orientation.yaw_deg = static_cast<float>(yaw_deg_.load());
-    }
+    msg.orientation.roll_deg = static_cast<float>(roll_deg_.load());
+    msg.orientation.pitch_deg = static_cast<float>(pitch_deg_.load());
+    msg.orientation.yaw_deg = static_cast<float>(yaw_deg_.load());
     position_pub_->publish(msg);
   }
 
@@ -516,6 +521,8 @@ private:
   std::atomic<int64_t> fc_rx_ns_{0};
   std::atomic<bool> fc_fix_{false};
   double fc_gps_max_age_sec_{1.0};
+  double attitude_max_age_sec_{1.0};
+  std::atomic<int64_t> ori_rx_ns_{0};
   double lrf_valid_min_m_{5.0}, lrf_valid_max_m_{300.0};
   std::atomic<double> pay_lat_{0.0}, pay_lon_{0.0}, pay_alt_{0.0};
   std::atomic<double> roll_deg_{0.0}, pitch_deg_{0.0}, yaw_deg_{0.0};
