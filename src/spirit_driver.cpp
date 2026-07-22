@@ -62,11 +62,7 @@ static PayloadSdkInterface* my_payload = nullptr;
 class SpiritDriver : public rclcpp::Node
 {
 public:
-  SpiritDriver()
-  : Node("spirit_driver"),
-    fc_gps_max_age_sec_(declare_parameter<double>("fc_gps_max_age_sec", 1.0)),
-    lrf_valid_min_m_(declare_parameter<double>("lrf_valid_min_m", 5.0)),
-    lrf_valid_max_m_(declare_parameter<double>("lrf_valid_max_m", 300.0))
+  SpiritDriver() : Node("spirit_driver")
   {
     // ---- Connection parameters (never hardcoded in the build) ----
     const std::string gremsy_ip = this->declare_parameter<std::string>("gremsy_ip", "192.168.70.23");
@@ -87,6 +83,10 @@ public:
     // this topic only. Override per-drone in config/<drone>.yaml.
     const std::string fc_gps_topic = this->declare_parameter<std::string>(
       "fc_gps_topic", "/robot_3/interface/mavros/global_position/global");
+    fc_gps_max_age_sec_ = this->declare_parameter<double>("fc_gps_max_age_sec", 1.0);
+    // LRF validity gate: exclude on-ground readings and no-return sentinels.
+    lrf_valid_min_m_ = this->declare_parameter<double>("lrf_valid_min_m", 5.0);
+    lrf_valid_max_m_ = this->declare_parameter<double>("lrf_valid_max_m", 300.0);
 
     // ---- Telemetry publishers ----
     gimbal_orientation_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(gimbal_orientation_topic, 10);
@@ -515,10 +515,8 @@ private:
   std::atomic<double> fc_lat_{0.0}, fc_lon_{0.0}, fc_alt_{0.0};
   std::atomic<int64_t> fc_rx_ns_{0};
   std::atomic<bool> fc_fix_{false};
-  const double fc_gps_max_age_sec_;
-  // LRF validity gate: exclude on-ground readings and no-return sentinels.
-  const double lrf_valid_min_m_;
-  const double lrf_valid_max_m_;
+  double fc_gps_max_age_sec_{1.0};
+  double lrf_valid_min_m_{5.0}, lrf_valid_max_m_{300.0};
   std::atomic<double> pay_lat_{0.0}, pay_lon_{0.0}, pay_alt_{0.0};
   std::atomic<double> roll_deg_{0.0}, pitch_deg_{0.0}, yaw_deg_{0.0};
   std::atomic<double> eo_zoom_{1.0}, lrf_range_{0.0};
