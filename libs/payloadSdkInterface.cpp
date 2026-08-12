@@ -181,7 +181,11 @@ PayloadSdkInterface::
 setPayloadCameraParam(char param_id[], uint32_t param_value, uint8_t param_type){
     mavlink_param_ext_set_t msg={0};
 
-    current_gimbal_mode = param_value;
+    // Only a gimbal-mode command may move the tracked mode; any other camera
+    // param (zoom, view source, ...) carries an unrelated value.
+    if(strcmp(param_id, PAYLOAD_CAMERA_GIMBAL_MODE) == 0){
+        current_gimbal_mode = param_value;
+    }
 
     strcpy((char *)msg.param_id, param_id);
 
@@ -1753,10 +1757,40 @@ _handle_msg_device_attitude(mavlink_message_t* msg)
     mavlink_gimbal_device_attitude_status_t attitude = {0};
     mavlink_msg_gimbal_device_attitude_status_decode(msg, &attitude);
 
+    // The flags the gimbal streams are its REAL mode; track it here so
+    // _handle_msg_mount_orientation selects yaw vs yaw_absolute from the
+    // device state, not from the last commanded camera param.
+    current_attitude_flags = attitude.flags;
+    char param_mode[16];
+    if(current_attitude_flags & GIMBAL_DEVICE_FLAGS_YAW_LOCK)
+    {
+        current_gimbal_mode = PAYLOAD_CAMERA_GIMBAL_MODE_LOCK;
+        strcpy(param_mode, "LOCK_MODE");
+    }
+    else if(current_attitude_flags & GIMBAL_DEVICE_FLAGS_RETRACT)
+    {
+        current_gimbal_mode = PAYLOAD_CAMERA_GIMBAL_MODE_OFF;
+        strcpy(param_mode, "OFF_MODE");
+    }
+    else if(current_attitude_flags & GIMBAL_DEVICE_FLAGS_NEUTRAL)
+    {
+        current_gimbal_mode = PAYLOAD_CAMERA_GIMBAL_MODE_RESET;
+        strcpy(param_mode, "RESET_MODE");
+    }
+    else if(current_attitude_flags & 0x4000)
+    {
+        current_gimbal_mode = PAYLOAD_CAMERA_GIMBAL_MODE_MAPPING;
+        strcpy(param_mode, "MAPPING_MODE");
+    }
+    else
+    {
+        current_gimbal_mode = PAYLOAD_CAMERA_GIMBAL_MODE_FOLLOW;
+        strcpy(param_mode, "FOLLOW_MODE");
+    }
+
     if(__notifyPayloadParamChanged != NULL)
     {
         double param[6];
-        char param_mode[16];
         float roll, pitch, yaw;
         mavlink_quaternion_to_euler(attitude.q, &roll, &pitch, &yaw);
 
@@ -1767,29 +1801,6 @@ _handle_msg_device_attitude(mavlink_message_t* msg)
         param[4] = attitude.angular_velocity_y;
         param[5] = attitude.angular_velocity_z;
 
-        // Save the current attitude flag 
-        current_attitude_flags = attitude.flags;
-
-        if(current_attitude_flags & GIMBAL_DEVICE_FLAGS_YAW_LOCK)
-        {
-            strcpy(param_mode, "LOCK_MODE");
-        }
-        else if(current_attitude_flags & GIMBAL_DEVICE_FLAGS_RETRACT)
-        {
-            strcpy(param_mode, "OFF_MODE");
-        }
-        else if(current_attitude_flags & GIMBAL_DEVICE_FLAGS_NEUTRAL)
-        {
-            strcpy(param_mode, "RESET_MODE");
-        }
-        else if(current_attitude_flags & 0x4000)
-        {
-            strcpy(param_mode, "MAPPING_MODE");
-        }
-        else 
-        {   
-            strcpy(param_mode, "FOLLOW_MODE");
-        }            
         __notifyPayloadParamChanged(PAYLOAD_GB_ATTITUDE, param_mode, (double *)param);
     }
 }
