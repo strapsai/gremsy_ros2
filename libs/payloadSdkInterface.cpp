@@ -1690,6 +1690,18 @@ _handle_msg_camera_settings(mavlink_message_t* msg){
 void
 PayloadSdkInterface::
 _handle_msg_mount_orientation(mavlink_message_t* msg){
+    // Several components share this link (camera, payload, gimbal) and more
+    // than one emits MOUNT_ORIENTATION; only the gimbal's stream carries the
+    // real attitude — others send zeroed fields. Accept the gimbal's only.
+    if(msg->compid != MAV_COMP_ID_GIMBAL
+        && msg->compid != MAV_COMP_ID_GIMBAL2
+        && msg->compid != MAV_COMP_ID_GIMBAL3
+        && msg->compid != MAV_COMP_ID_GIMBAL4
+        && msg->compid != MAV_COMP_ID_GIMBAL5
+        && msg->compid != MAV_COMP_ID_GIMBAL6){
+        return;
+    }
+
     mavlink_mount_orientation_t packet;
     mavlink_msg_mount_orientation_decode(msg, &packet);
 
