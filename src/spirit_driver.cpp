@@ -137,6 +137,11 @@ public:
       std::bind(&SpiritDriver::onPayloadStreamChanged, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
     my_payload->checkPayloadConnection();
     my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_RC_MODE, PAYLOAD_CAMERA_RC_MODE_STANDARD, PARAM_TYPE_UINT32);
+    // Absolute zoom targets (setCameraZoomTarget) address the COMBINE range;
+    // set the mode once here so GimbalCommand.zoom levels always mean the
+    // same thing, whatever the payload was left in.
+    my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_VIDEO_ZOOM_MODE,
+                                      PAYLOAD_CAMERA_VIDEO_ZOOM_MODE_COMBINE, PARAM_TYPE_UINT32);
 
     request_param_rates();
 
@@ -503,12 +508,41 @@ private:
     const float pitch_deg = static_cast<float>(pitch_rad * 180.0 / M_PI);
     const float yaw_deg = static_cast<float>(yaw_rad * 180.0 / M_PI);
     my_payload->setGimbalSpeed(pitch_deg, roll_deg, yaw_deg, INPUT_ANGLE);
+    applyZoom(cmd.zoom);
+  }
+
+  // Wire contract for GimbalCommand.zoom: 0.0 = no zoom action (the value the
+  // basestation's manual set_gimbal_angle path has always sent, so it must
+  // stay a no-op), >= 1.0 = absolute combined zoom level. The gimbal pointer
+  // streams commands at 5 Hz, so re-sends are suppressed: a zoom command
+  // only goes to the payload when the requested level actually changes, and
+  // no more than once a second.
+  void applyZoom(float zoom)
+  {
+    if (zoom < 1.0f || my_payload == nullptr) {
+      return;
+    }
+    const auto now = this->get_clock()->now();
+    const bool level_changed =
+      last_zoom_commanded_ < 0.0f || std::fabs(zoom - last_zoom_commanded_) > 0.05f;
+    if (!level_changed) {
+      return;
+    }
+    if (last_zoom_sent_.nanoseconds() > 0 && (now - last_zoom_sent_).seconds() < 1.0) {
+      return;
+    }
+    my_payload->setCameraZoomTarget(zoom);
+    last_zoom_commanded_ = zoom;
+    last_zoom_sent_ = now;
+    RCLCPP_INFO(this->get_logger(), "EO zoom -> %.1fx (combined)", zoom);
   }
 
   // ---- members ----
   T_ConnInfo conn_{};
   std::string gimbal_command_topic_;
   std::string move_gimbal_angle_topic_;
+  float last_zoom_commanded_ = -1.0f;   // <0 = nothing commanded yet
+  rclcpp::Time last_zoom_sent_{0, 0, RCL_ROS_TIME};
 
   rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gimbal_orientation_pub_;
   rclcpp::Publisher<lion_ros2_bridge::msg::Position>::SharedPtr position_pub_;
