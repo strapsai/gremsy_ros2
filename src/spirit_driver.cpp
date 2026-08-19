@@ -635,79 +635,53 @@ private:
     }
   }
 
-  // Combined zoom is a PARAMETER with a discrete level index -- NOT the float
-  // multiplier it looks like, and not what setCameraZoomTarget() sends.
+  // Absolute zoom goes through MAV_CMD_SET_CAMERA_ZOOM with ZOOM_TYPE_RANGE --
+  // the path the working UI demo uses (tests/ui_demo/main.cpp:108). Two other
+  // zoom APIs exist and neither does what it looks like:
+  // setCameraZoomTarget() sends a raw zoom POSITION (payloadSdkInterface.cpp:
+  // 1262-1271), and the C_V_ZM_CB_LV combine-factor parameter takes a discrete
+  // ladder index. Both were tried on nx3 and neither moved the lens.
   //
-  // setCameraZoomTarget(x) issues MAV_CMD_USER_4 with PAYLOADSDK_ZOOM_POS
-  // (payloadSdkInterface.cpp:1262-1271), where param4 is a raw zoom POSITION.
-  // Asking for "4" there lands essentially at the wide end of the position
-  // range, which is why the payload kept reporting 1.0x however large a zoom we
-  // commanded. The combined level is instead set through
-  // PAYLOAD_CAMERA_VIDEO_ZOOM_COMBINE_FACTOR ("C_V_ZM_CB_LV") with an INDEX
-  // into the payload's ladder -- for VIO, 4x is index 2, not 4.
-  //
-  // The ladder is payload-specific (VIO steps 1,2,4,6,8,10..., ORUSL/ZIO only
-  // 1,10,20,40...), so the table is selected by the same build define that
-  // picks the SDK header. Requests land on the nearest level at or below the
-  // ask, so a request never silently zooms in FURTHER than the caller wanted.
-  void setCombineZoom(float zoom)
+  // MEASURED ON THIS PAYLOAD, 2026-08-19: the scale is INVERTED relative to the
+  // MAVLink convention. The spec says 0 = wide and 100 = tele; here a LOWER
+  // value is MORE zoomed in (50 is tighter than 75). Do not "fix" this to match
+  // the spec without re-checking on the aircraft.
+  void setZoomRange(float range)
   {
-#if defined VIO
-    static const std::pair<float, int> kLadder[] = {
-      {1, ZOOM_COMBINE_1X}, {2, ZOOM_COMBINE_2X}, {4, ZOOM_COMBINE_4X},
-      {6, ZOOM_COMBINE_6X}, {8, ZOOM_COMBINE_8X}, {10, ZOOM_COMBINE_10X},
-      {12, ZOOM_COMBINE_12X}, {14, ZOOM_COMBINE_14X}, {16, ZOOM_COMBINE_16X},
-      {18, ZOOM_COMBINE_18X}, {20, ZOOM_COMBINE_20X}, {40, ZOOM_COMBINE_40X},
-      {60, ZOOM_COMBINE_60X}, {80, ZOOM_COMBINE_80X}, {100, ZOOM_COMBINE_100X},
-      {120, ZOOM_COMBINE_120X}, {140, ZOOM_COMBINE_140X}, {160, ZOOM_COMBINE_160X},
-      {180, ZOOM_COMBINE_180X}, {200, ZOOM_COMBINE_200X}, {220, ZOOM_COMBINE_220X},
-      {240, ZOOM_COMBINE_240X},
-    };
-#elif defined ZIO || defined ORUSL
-    static const std::pair<float, int> kLadder[] = {
-      {1, ZOOM_COMBINE_1X}, {10, ZOOM_COMBINE_10X}, {20, ZOOM_COMBINE_20X},
-      {40, ZOOM_COMBINE_40X}, {80, ZOOM_COMBINE_80X}, {120, ZOOM_COMBINE_120X},
-      {240, ZOOM_COMBINE_240X},
-    };
-#endif
-#if defined VIO || defined ZIO || defined ORUSL
-    float chosen = kLadder[0].first;
-    int index = kLadder[0].second;
-    for (const auto & step : kLadder) {
-      if (step.first <= zoom + 1e-3f) {
-        chosen = step.first;
-        index = step.second;
-      }
-    }
-    setCamParam(PAYLOAD_CAMERA_VIDEO_ZOOM_COMBINE_FACTOR, index);
-    if (std::fabs(chosen - zoom) > 1e-3f) {
-      RCLCPP_INFO(this->get_logger(),
-                  "zoom %.1fx is not a supported combined level; using %.0fx (index %d)",
-                  zoom, chosen, index);
-    }
-#else
-    (void)zoom;
-    RCLCPP_WARN_ONCE(this->get_logger(),
-                     "this payload build exposes no combined-zoom ladder; zoom ignored");
-#endif
+    my_payload->setCameraZoom(ZOOM_TYPE_RANGE, range);
   }
 
   // Wire contract for GimbalCommand.zoom: 0.0 = no zoom action (the value the
   // basestation's manual set_gimbal_angle path has always sent, so it must
-  // stay a no-op), >= 1.0 = absolute combined zoom level. The gimbal pointer
-  // streams commands at 5 Hz, so re-sends are rate-limited rather than passed
-  // straight through.
+  // stay a no-op), anything in (0, 100] = an absolute ZOOM RANGE POSITION.
   //
-  // A change is sent promptly (at most once a second); an UNCHANGED level is
+  // NOT a magnification. The field used to be documented as a zoom level and
+  // carried 4.0 meaning "4x"; it now carries a payload range position where
+  // LOWER IS MORE ZOOMED IN (measured, see setZoomRange). A magnification could
+  // only be converted into this with the payload's zoom curve, which we do not
+  // have, so the knob is the range itself and the value is chosen by looking at
+  // the video. The only other publisher of this field is the basestation's
+  // manual path, which sends 0.0 and is unaffected.
+  //
+  // Because 0.0 is the no-op sentinel, an exact 0.0 range (maximum tele) is not
+  // reachable; use a small positive value.
+  //
+  // The gimbal pointer streams commands at 5 Hz, so re-sends are rate-limited.
+  // A change is sent promptly (at most once a second); an UNCHANGED value is
   // re-asserted every zoom_reassert_sec. That re-assert is not redundancy for
   // its own sake: this used to latch on the first send, so the payload got
   // exactly ONE zoom command per inspection, and if that command was dropped --
-  // payload still connecting, camera busy, zoom mode not yet applied -- the
-  // camera stayed wide for the whole inspection and never retried. Re-asserting
-  // costs one message every few seconds and removes the whole failure mode.
+  // payload still connecting, camera busy -- the camera stayed wide for the
+  // whole inspection and never retried.
   void applyZoom(float zoom)
   {
-    if (zoom < 1.0f || my_payload == nullptr) {
+    if (my_payload == nullptr || zoom <= 0.0f) {
+      return;
+    }
+    if (zoom > 100.0f) {
+      RCLCPP_WARN_ONCE(this->get_logger(),
+                       "GimbalCommand.zoom %.1f is out of the 0-100 range scale; "
+                       "this field is a range POSITION, not a magnification", zoom);
       return;
     }
     const auto now = this->get_clock()->now();
@@ -718,17 +692,16 @@ private:
     if (level_changed ? (since_sent < 1.0) : (since_sent < zoom_reassert_sec_)) {
       return;
     }
-    setCombineZoom(zoom);
+    setZoomRange(zoom);
     last_zoom_commanded_ = zoom;
     last_zoom_sent_ = now;
     if (level_changed) {
-      RCLCPP_INFO(this->get_logger(), "EO zoom -> %.1fx (combined)", zoom);
-    } else if (have_zoom_.load() && std::fabs(eo_zoom_.load() - zoom) > 0.25) {
-      // Commanded and reported disagree well after the command went out. This
-      // is the symptom that used to be silent: the payload is ignoring the
-      // target, so say so rather than assuming the send succeeded.
-      RCLCPP_WARN(this->get_logger(),
-                  "EO zoom commanded %.1fx but payload reports %.1fx", zoom, eo_zoom_.load());
+      // eo_zoom_ (PARAM_EO_ZOOM_LEVEL) is the OPTICAL magnification and is not
+      // comparable to a range position, so it is logged as context, never as a
+      // pass/fail check.
+      RCLCPP_INFO(this->get_logger(),
+                  "zoom range -> %.1f (lower = tighter); EO optical now %.1fx",
+                  zoom, eo_zoom_.load());
     }
   }
 
