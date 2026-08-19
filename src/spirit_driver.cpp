@@ -172,6 +172,12 @@ public:
     // same thing, whatever the payload was left in.
     my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_VIDEO_ZOOM_MODE,
                                       PAYLOAD_CAMERA_VIDEO_ZOOM_MODE_COMBINE, PARAM_TYPE_UINT32);
+    // ...and immediately undo what that write did to the SDK's gimbal state.
+    // ZOOM_MODE_COMBINE is 0, which is also GIMBAL_MODE_OFF, so the line above
+    // leaves the SDK convinced the gimbal is OFF and every attitude command
+    // from here on would carry GIMBAL_DEVICE_FLAGS_RETRACT. See setCamParam().
+    gimbal_mode_dirty_ = true;
+    ensureGimbalMode();
 
     request_param_rates();
 
@@ -411,9 +417,23 @@ private:
     });
   }
 
+  // EVERY camera-parameter write corrupts the gimbal attitude flags. The SDK
+  // assigns `current_gimbal_mode = param_value` for ANY parameter
+  // (payloadSdkInterface.cpp:184), and setGimbalSpeed then derives its
+  // GIMBAL_DEVICE flags from that same variable (ibid. 1135-1150) -- so writing
+  // an unrelated camera parameter decides how the next attitude command is
+  // interpreted. The value collision is total: ZOOM_MODE_COMBINE,
+  // ZOOM_COMBINE_1X and GIMBAL_MODE_OFF are all 0, and OFF maps to
+  // GIMBAL_DEVICE_FLAGS_RETRACT -- the stow command. That is why the gimbal
+  // tracked a commanded angle briefly and then returned to pointing down.
+  //
+  // Mark the mode dirty on every write so the next attitude command re-asserts
+  // it. Rate-limiting alone is not enough: between two re-asserts, any camera
+  // write silently re-arms RETRACT.
   void setCamParam(const char* id, int value, uint8_t type = PARAM_TYPE_UINT32)
   {
     my_payload->setPayloadCameraParam(const_cast<char*>(id), value, type);
+    gimbal_mode_dirty_ = true;
   }
 
   void setup_command_subscriptions()
@@ -475,7 +495,16 @@ private:
     subs_.push_back(sub<Float64>(CMD_GIMBAL_PAN, [](const Float64& m){ my_payload->setGimbalSpeed(0, 0, m.data, INPUT_SPEED); }));
     subs_.push_back(sub<Vector3>(CMD_GIMBAL_ANGLE, [](const Vector3& m){
       my_payload->setGimbalSpeed(m.x, m.y, m.z, INPUT_ANGLE); }));  // (pitch, roll, yaw)
-    subs_.push_back(sub<Int32>(CMD_GIMBAL_MODE, [this](const Int32& m){ setCamParam(PAYLOAD_CAMERA_GIMBAL_MODE, m.data); }));
+    // An operator setting the mode also becomes the mode we ASSERT from here
+    // on. Without this the next attitude command would re-assert the configured
+    // mode 200 ms later and silently undo them.
+    subs_.push_back(sub<Int32>(CMD_GIMBAL_MODE, [this](const Int32& m){
+      gimbal_mode_ = m.data;
+      setCamParam(PAYLOAD_CAMERA_GIMBAL_MODE, m.data);
+      gimbal_mode_dirty_ = false;
+      last_mode_sent_ = this->get_clock()->now();
+      RCLCPP_INFO(this->get_logger(), "gimbal mode set to %d by operator", m.data);
+    }));
 
     // Misc
     subs_.push_back(sub<Empty>(CMD_QUERY_PARAMS, [](const Empty&){
@@ -528,6 +557,7 @@ private:
     iss >> type_str;
     const uint8_t type = (type_str == "int32") ? PARAM_TYPE_INT32 : PARAM_TYPE_UINT32;
     my_payload->setPayloadCameraParam(const_cast<char*>(id.c_str()), static_cast<int>(value), type);
+    gimbal_mode_dirty_ = true;  // any camera write clobbers it; see setCamParam()
     RCLCPP_INFO(this->get_logger(), "set_camera_param %s = %g (%s)", id.c_str(), value,
                 type == PARAM_TYPE_INT32 ? "int32" : "uint32");
   }
@@ -546,9 +576,14 @@ private:
     const float roll_deg = static_cast<float>(roll_rad * 180.0 / M_PI);
     const float pitch_deg = static_cast<float>(pitch_rad * 180.0 / M_PI);
     const float yaw_deg = static_cast<float>(yaw_rad * 180.0 / M_PI);
+    // ORDER IS LORE-BEARING. applyZoom writes a camera parameter, which
+    // clobbers the SDK's current_gimbal_mode and therefore the flags
+    // setGimbalSpeed will send. Zoom first, then assert the mode, then command
+    // the angle -- so the mode is correct at the instant it is read. Zooming
+    // last (as this did) left RETRACT armed for the following command.
+    applyZoom(cmd.zoom);
     ensureGimbalMode();
     my_payload->setGimbalSpeed(pitch_deg, roll_deg, yaw_deg, INPUT_ANGLE);
-    applyZoom(cmd.zoom);
   }
 
   // Gremsy's GB_MODE vocabulary and lion_ros2_bridge/GimbalState's are NOT the
@@ -572,17 +607,24 @@ private:
   // driver inherited whatever the payload booted in -- and an absolute angle
   // sent into OFF produces a brief move followed by a decay back to the
   // resting attitude, with nothing in the logs to say why.
+  // MUST be called immediately before setGimbalSpeed, with no camera-parameter
+  // write in between -- see setCamParam() for why. Sends when the SDK's notion
+  // of the mode has been dirtied by another write, or when the re-assert
+  // interval has elapsed (so the mode also recovers from a payload power-cycle
+  // or another operator changing it underneath us).
   void ensureGimbalMode()
   {
     if (my_payload == nullptr) {
       return;
     }
     const auto now = this->get_clock()->now();
-    if (last_mode_sent_.nanoseconds() > 0 &&
-        (now - last_mode_sent_).seconds() < gimbal_mode_reassert_sec_) {
+    const bool stale = last_mode_sent_.nanoseconds() == 0 ||
+      (now - last_mode_sent_).seconds() >= gimbal_mode_reassert_sec_;
+    if (!gimbal_mode_dirty_ && !stale) {
       return;
     }
     setCamParam(PAYLOAD_CAMERA_GIMBAL_MODE, gimbal_mode_);
+    gimbal_mode_dirty_ = false;   // set by the setCamParam above; this IS the mode
     last_mode_sent_ = now;
     // Log only on a real transition, so a healthy stack stays quiet but a
     // gimbal being fought over by another operator is visible.
@@ -700,6 +742,9 @@ private:
   int gimbal_mode_ = PAYLOAD_CAMERA_GIMBAL_MODE_FOLLOW;
   double gimbal_mode_reassert_sec_ = 2.0;
   rclcpp::Time last_mode_sent_{0, 0, RCL_ROS_TIME};
+  // True when a camera-parameter write has overwritten the SDK's
+  // current_gimbal_mode and the next attitude command must re-assert it.
+  bool gimbal_mode_dirty_ = true;
 
   rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gimbal_orientation_pub_;
   rclcpp::Publisher<lion_ros2_bridge::msg::Position>::SharedPtr position_pub_;
