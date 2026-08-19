@@ -24,7 +24,9 @@
 #include <map>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rclcpp/rclcpp.hpp"
@@ -88,6 +90,34 @@ public:
     // LRF validity gate: exclude on-ground readings and no-return sentinels.
     lrf_valid_min_m_ = this->declare_parameter<double>("lrf_valid_min_m", 5.0);
     lrf_valid_max_m_ = this->declare_parameter<double>("lrf_valid_max_m", 300.0);
+    // Gimbal control mode asserted before every ORIENTATION command. An absolute
+    // angle only HOLDS if the payload is in a mode that accepts it: left in OFF
+    // (the power-on default) the gimbal tracks the command briefly and then
+    // decays back to its resting attitude, which reads as "it always ends up
+    // pointing down". Measured on nx3, 2026-08-18.
+    //
+    // MUST agree with spirit_task_executor's `gimbal_yaw_frame`, which decides
+    // whether the yaw we send is body-relative or earth-referenced:
+    //     follow <-> gimbal_yaw_frame: body       (yaw relative to the airframe)
+    //     lock   <-> gimbal_yaw_frame: absolute   (yaw is a compass heading)
+    // Flipping one without the other points the camera at the wrong bearing.
+    const std::string mode_name = this->declare_parameter<std::string>("gimbal_mode", "follow");
+    if (mode_name == "lock") {
+      gimbal_mode_ = PAYLOAD_CAMERA_GIMBAL_MODE_LOCK;
+    } else if (mode_name == "follow") {
+      gimbal_mode_ = PAYLOAD_CAMERA_GIMBAL_MODE_FOLLOW;
+    } else {
+      RCLCPP_ERROR(this->get_logger(),
+                   "gimbal_mode must be 'follow' or 'lock', got '%s'", mode_name.c_str());
+      throw std::runtime_error("invalid gimbal_mode");
+    }
+    // How often the mode is re-asserted while commands stream in. The pointer
+    // publishes at 5 Hz; writing GB_MODE that often would flood the payload
+    // link for no gain, so assert on a slow cadence and let it recover if the
+    // payload is power-cycled or another operator changes the mode underneath us.
+    gimbal_mode_reassert_sec_ = this->declare_parameter<double>("gimbal_mode_reassert_sec", 2.0);
+    // Zoom is re-asserted on the same principle -- see applyZoom().
+    zoom_reassert_sec_ = this->declare_parameter<double>("zoom_reassert_sec", 3.0);
 
     // ---- Telemetry publishers ----
     gimbal_orientation_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(gimbal_orientation_topic, 10);
@@ -137,6 +167,17 @@ public:
       std::bind(&SpiritDriver::onPayloadStreamChanged, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
     my_payload->checkPayloadConnection();
     my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_RC_MODE, PAYLOAD_CAMERA_RC_MODE_STANDARD, PARAM_TYPE_UINT32);
+    // Absolute zoom targets (setCameraZoomTarget) address the COMBINE range;
+    // set the mode once here so GimbalCommand.zoom levels always mean the
+    // same thing, whatever the payload was left in.
+    my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_VIDEO_ZOOM_MODE,
+                                      PAYLOAD_CAMERA_VIDEO_ZOOM_MODE_COMBINE, PARAM_TYPE_UINT32);
+    // ...and immediately undo what that write did to the SDK's gimbal state.
+    // ZOOM_MODE_COMBINE is 0, which is also GIMBAL_MODE_OFF, so the line above
+    // leaves the SDK convinced the gimbal is OFF and every attitude command
+    // from here on would carry GIMBAL_DEVICE_FLAGS_RETRACT. See setCamParam().
+    gimbal_mode_dirty_ = true;
+    ensureGimbalMode();
 
     request_param_rates();
 
@@ -191,6 +232,10 @@ private:
         else if (idx == PARAM_PAYLOAD_GPS_ALT) { pay_alt_.store(param[1]); have_alt_.store(true); }
         else if (idx == PARAM_EO_ZOOM_LEVEL) { eo_zoom_.store(param[1]); have_zoom_.store(true); }
         else if (idx == PARAM_LRF_RANGE) { lrf_range_.store(param[1]); have_lrf_.store(true); }
+        // The mode was already polled at 1 Hz (request_param_rates) but thrown
+        // away, so GimbalState.mode reported UNSPECIFIED and the one thing that
+        // explains a decaying gimbal was invisible from ROS. Keep it.
+        else if (idx == PARAM_GIMBAL_MODE) { gb_mode_.store(static_cast<int>(param[1])); have_mode_.store(true); }
         break;
       }
       case PAYLOAD_CAM_STORAGE_INFO: {
@@ -309,7 +354,8 @@ private:
       msg.roll_deg = static_cast<float>(roll_deg_.load());
     }
     msg.zoom_level = static_cast<float>(eo_zoom_.load());
-    msg.mode = 0;  // UNSPECIFIED
+    msg.mode = have_mode_.load() ? gimbalStateMode(gb_mode_.load())
+                                 : lion_ros2_bridge::msg::GimbalState::MODE_UNSPECIFIED;
     gimbal_state_pub_->publish(msg);
   }
 
@@ -371,9 +417,23 @@ private:
     });
   }
 
+  // EVERY camera-parameter write corrupts the gimbal attitude flags. The SDK
+  // assigns `current_gimbal_mode = param_value` for ANY parameter
+  // (payloadSdkInterface.cpp:184), and setGimbalSpeed then derives its
+  // GIMBAL_DEVICE flags from that same variable (ibid. 1135-1150) -- so writing
+  // an unrelated camera parameter decides how the next attitude command is
+  // interpreted. The value collision is total: ZOOM_MODE_COMBINE,
+  // ZOOM_COMBINE_1X and GIMBAL_MODE_OFF are all 0, and OFF maps to
+  // GIMBAL_DEVICE_FLAGS_RETRACT -- the stow command. That is why the gimbal
+  // tracked a commanded angle briefly and then returned to pointing down.
+  //
+  // Mark the mode dirty on every write so the next attitude command re-asserts
+  // it. Rate-limiting alone is not enough: between two re-asserts, any camera
+  // write silently re-arms RETRACT.
   void setCamParam(const char* id, int value, uint8_t type = PARAM_TYPE_UINT32)
   {
     my_payload->setPayloadCameraParam(const_cast<char*>(id), value, type);
+    gimbal_mode_dirty_ = true;
   }
 
   void setup_command_subscriptions()
@@ -435,7 +495,16 @@ private:
     subs_.push_back(sub<Float64>(CMD_GIMBAL_PAN, [](const Float64& m){ my_payload->setGimbalSpeed(0, 0, m.data, INPUT_SPEED); }));
     subs_.push_back(sub<Vector3>(CMD_GIMBAL_ANGLE, [](const Vector3& m){
       my_payload->setGimbalSpeed(m.x, m.y, m.z, INPUT_ANGLE); }));  // (pitch, roll, yaw)
-    subs_.push_back(sub<Int32>(CMD_GIMBAL_MODE, [this](const Int32& m){ setCamParam(PAYLOAD_CAMERA_GIMBAL_MODE, m.data); }));
+    // An operator setting the mode also becomes the mode we ASSERT from here
+    // on. Without this the next attitude command would re-assert the configured
+    // mode 200 ms later and silently undo them.
+    subs_.push_back(sub<Int32>(CMD_GIMBAL_MODE, [this](const Int32& m){
+      gimbal_mode_ = m.data;
+      setCamParam(PAYLOAD_CAMERA_GIMBAL_MODE, m.data);
+      gimbal_mode_dirty_ = false;
+      last_mode_sent_ = this->get_clock()->now();
+      RCLCPP_INFO(this->get_logger(), "gimbal mode set to %d by operator", m.data);
+    }));
 
     // Misc
     subs_.push_back(sub<Empty>(CMD_QUERY_PARAMS, [](const Empty&){
@@ -466,8 +535,12 @@ private:
     // restored at its original absolute name for backward compatibility.
     move_gimbal_angle_sub_ = this->create_subscription<geometry_msgs::msg::Vector3>(
       move_gimbal_angle_topic_, 10,
-      [](const geometry_msgs::msg::Vector3::SharedPtr m) {
-        if (my_payload != nullptr) my_payload->setGimbalSpeed(m->x, m->y, m->z, INPUT_ANGLE);
+      [this](const geometry_msgs::msg::Vector3::SharedPtr m) {
+        if (my_payload == nullptr) return;
+        // Same reason as onGimbalCommand: an absolute angle only holds if the
+        // payload is in a mode that accepts one.
+        ensureGimbalMode();
+        my_payload->setGimbalSpeed(m->x, m->y, m->z, INPUT_ANGLE);
       });
   }
 
@@ -484,6 +557,7 @@ private:
     iss >> type_str;
     const uint8_t type = (type_str == "int32") ? PARAM_TYPE_INT32 : PARAM_TYPE_UINT32;
     my_payload->setPayloadCameraParam(const_cast<char*>(id.c_str()), static_cast<int>(value), type);
+    gimbal_mode_dirty_ = true;  // any camera write clobbers it; see setCamParam()
     RCLCPP_INFO(this->get_logger(), "set_camera_param %s = %g (%s)", id.c_str(), value,
                 type == PARAM_TYPE_INT32 ? "int32" : "uint32");
   }
@@ -502,13 +576,148 @@ private:
     const float roll_deg = static_cast<float>(roll_rad * 180.0 / M_PI);
     const float pitch_deg = static_cast<float>(pitch_rad * 180.0 / M_PI);
     const float yaw_deg = static_cast<float>(yaw_rad * 180.0 / M_PI);
+    // ORDER IS LORE-BEARING. applyZoom writes a camera parameter, which
+    // clobbers the SDK's current_gimbal_mode and therefore the flags
+    // setGimbalSpeed will send. Zoom first, then assert the mode, then command
+    // the angle -- so the mode is correct at the instant it is read. Zooming
+    // last (as this did) left RETRACT armed for the following command.
+    applyZoom(cmd.zoom);
+    ensureGimbalMode();
     my_payload->setGimbalSpeed(pitch_deg, roll_deg, yaw_deg, INPUT_ANGLE);
+  }
+
+  // Gremsy's GB_MODE vocabulary and lion_ros2_bridge/GimbalState's are NOT the
+  // same numbers -- Gremsy is OFF=0, LOCK=1, FOLLOW=2 while the message is
+  // UNSPECIFIED=0, FOLLOW=1, LOCK=2. Passing one through as the other reports
+  // exactly the opposite mode, so translate explicitly.
+  static uint8_t gimbalStateMode(int gremsy_mode)
+  {
+    using GS = lion_ros2_bridge::msg::GimbalState;
+    switch (gremsy_mode) {
+      case PAYLOAD_CAMERA_GIMBAL_MODE_LOCK:   return GS::MODE_LOCK;
+      case PAYLOAD_CAMERA_GIMBAL_MODE_FOLLOW: return GS::MODE_FOLLOW;
+      // OFF/MAPPING/RESET have no GimbalState equivalent. UNSPECIFIED is honest
+      // here: the consumer learns "not a mode you can reason about", which is
+      // the truth, rather than a plausible wrong one.
+      default: return GS::MODE_UNSPECIFIED;
+    }
+  }
+
+  // Assert the control mode the commanded angles assume. Without this the
+  // driver inherited whatever the payload booted in -- and an absolute angle
+  // sent into OFF produces a brief move followed by a decay back to the
+  // resting attitude, with nothing in the logs to say why.
+  // MUST be called immediately before setGimbalSpeed, with no camera-parameter
+  // write in between -- see setCamParam() for why. Sends when the SDK's notion
+  // of the mode has been dirtied by another write, or when the re-assert
+  // interval has elapsed (so the mode also recovers from a payload power-cycle
+  // or another operator changing it underneath us).
+  void ensureGimbalMode()
+  {
+    if (my_payload == nullptr) {
+      return;
+    }
+    const auto now = this->get_clock()->now();
+    const bool stale = last_mode_sent_.nanoseconds() == 0 ||
+      (now - last_mode_sent_).seconds() >= gimbal_mode_reassert_sec_;
+    if (!gimbal_mode_dirty_ && !stale) {
+      return;
+    }
+    setCamParam(PAYLOAD_CAMERA_GIMBAL_MODE, gimbal_mode_);
+    gimbal_mode_dirty_ = false;   // set by the setCamParam above; this IS the mode
+    last_mode_sent_ = now;
+    // Log only on a real transition, so a healthy stack stays quiet but a
+    // gimbal being fought over by another operator is visible.
+    if (have_mode_.load() && gb_mode_.load() != gimbal_mode_) {
+      RCLCPP_WARN(this->get_logger(),
+                  "gimbal mode was %d, asserting %d (GB_MODE: OFF=0 LOCK=1 FOLLOW=2)",
+                  gb_mode_.load(), gimbal_mode_);
+    }
+  }
+
+  // Absolute zoom goes through MAV_CMD_SET_CAMERA_ZOOM with ZOOM_TYPE_RANGE --
+  // the path the working UI demo uses (tests/ui_demo/main.cpp:108). Two other
+  // zoom APIs exist and neither does what it looks like:
+  // setCameraZoomTarget() sends a raw zoom POSITION (payloadSdkInterface.cpp:
+  // 1262-1271), and the C_V_ZM_CB_LV combine-factor parameter takes a discrete
+  // ladder index. Both were tried on nx3 and neither moved the lens.
+  //
+  // MEASURED ON THIS PAYLOAD, 2026-08-19: the scale is INVERTED relative to the
+  // MAVLink convention. The spec says 0 = wide and 100 = tele; here a LOWER
+  // value is MORE zoomed in (50 is tighter than 75). Do not "fix" this to match
+  // the spec without re-checking on the aircraft.
+  void setZoomRange(float range)
+  {
+    my_payload->setCameraZoom(ZOOM_TYPE_RANGE, range);
+  }
+
+  // Wire contract for GimbalCommand.zoom: 0.0 = no zoom action (the value the
+  // basestation's manual set_gimbal_angle path has always sent, so it must
+  // stay a no-op), anything in (0, 100] = an absolute ZOOM RANGE POSITION.
+  //
+  // NOT a magnification. The field used to be documented as a zoom level and
+  // carried 4.0 meaning "4x"; it now carries a payload range position where
+  // LOWER IS MORE ZOOMED IN (measured, see setZoomRange). A magnification could
+  // only be converted into this with the payload's zoom curve, which we do not
+  // have, so the knob is the range itself and the value is chosen by looking at
+  // the video. The only other publisher of this field is the basestation's
+  // manual path, which sends 0.0 and is unaffected.
+  //
+  // Because 0.0 is the no-op sentinel, an exact 0.0 range (maximum tele) is not
+  // reachable; use a small positive value.
+  //
+  // The gimbal pointer streams commands at 5 Hz, so re-sends are rate-limited.
+  // A change is sent promptly (at most once a second); an UNCHANGED value is
+  // re-asserted every zoom_reassert_sec. That re-assert is not redundancy for
+  // its own sake: this used to latch on the first send, so the payload got
+  // exactly ONE zoom command per inspection, and if that command was dropped --
+  // payload still connecting, camera busy -- the camera stayed wide for the
+  // whole inspection and never retried.
+  void applyZoom(float zoom)
+  {
+    if (my_payload == nullptr || zoom <= 0.0f) {
+      return;
+    }
+    if (zoom > 100.0f) {
+      RCLCPP_WARN_ONCE(this->get_logger(),
+                       "GimbalCommand.zoom %.1f is out of the 0-100 range scale; "
+                       "this field is a range POSITION, not a magnification", zoom);
+      return;
+    }
+    const auto now = this->get_clock()->now();
+    const bool level_changed =
+      last_zoom_commanded_ < 0.0f || std::fabs(zoom - last_zoom_commanded_) > 0.05f;
+    const double since_sent =
+      last_zoom_sent_.nanoseconds() > 0 ? (now - last_zoom_sent_).seconds() : 1e9;
+    if (level_changed ? (since_sent < 1.0) : (since_sent < zoom_reassert_sec_)) {
+      return;
+    }
+    setZoomRange(zoom);
+    last_zoom_commanded_ = zoom;
+    last_zoom_sent_ = now;
+    if (level_changed) {
+      // eo_zoom_ (PARAM_EO_ZOOM_LEVEL) is the OPTICAL magnification and is not
+      // comparable to a range position, so it is logged as context, never as a
+      // pass/fail check.
+      RCLCPP_INFO(this->get_logger(),
+                  "zoom range -> %.1f (lower = tighter); EO optical now %.1fx",
+                  zoom, eo_zoom_.load());
+    }
   }
 
   // ---- members ----
   T_ConnInfo conn_{};
   std::string gimbal_command_topic_;
   std::string move_gimbal_angle_topic_;
+  float last_zoom_commanded_ = -1.0f;   // <0 = nothing commanded yet
+  rclcpp::Time last_zoom_sent_{0, 0, RCL_ROS_TIME};
+  double zoom_reassert_sec_ = 3.0;
+  int gimbal_mode_ = PAYLOAD_CAMERA_GIMBAL_MODE_FOLLOW;
+  double gimbal_mode_reassert_sec_ = 2.0;
+  rclcpp::Time last_mode_sent_{0, 0, RCL_ROS_TIME};
+  // True when a camera-parameter write has overwritten the SDK's
+  // current_gimbal_mode and the next attitude command must re-assert it.
+  bool gimbal_mode_dirty_ = true;
 
   rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr gimbal_orientation_pub_;
   rclcpp::Publisher<lion_ros2_bridge::msg::Position>::SharedPtr position_pub_;
@@ -527,7 +736,8 @@ private:
   std::atomic<double> pay_lat_{0.0}, pay_lon_{0.0}, pay_alt_{0.0};
   std::atomic<double> roll_deg_{0.0}, pitch_deg_{0.0}, yaw_deg_{0.0};
   std::atomic<double> eo_zoom_{1.0}, lrf_range_{0.0};
-  std::atomic<bool> have_lat_{false}, have_lon_{false}, have_alt_{false}, have_orientation_{false}, have_zoom_{false}, have_lrf_{false};
+  std::atomic<int> gb_mode_{PAYLOAD_CAMERA_GIMBAL_MODE_OFF};
+  std::atomic<bool> have_lat_{false}, have_lon_{false}, have_alt_{false}, have_orientation_{false}, have_zoom_{false}, have_lrf_{false}, have_mode_{false};
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr cam_param_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr stream_uri_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr has_video_pub_;

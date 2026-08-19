@@ -6,3 +6,9 @@
     gimbal_command_topic: "/spiritnx2/gimbal/command"
     gimbal_orientation_topic: "/gimbal_orientation"
     move_gimbal_angle_topic: "/move_gimbal_angle"
+    # Control mode asserted before every absolute-angle command. MUST agree with
+    # spirit_task_executor's `gimbal_yaw_frame` (config/spiritnx2.yaml), which
+    # decides whether the yaw we send is body-relative or a compass heading:
+    #   follow <-> gimbal_yaw_frame: body       lock <-> gimbal_yaw_frame: absolute
+    # Changing one without the other points the camera at the wrong bearing.
+    gimbal_mode: "follow"
