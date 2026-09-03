@@ -61,7 +61,7 @@ create_payload_setting_main_group() {
     auto frame = Gtk::make_managed<Gtk::Frame>("Payload Settings");
     this->signal_size_allocate().connect([frame](Gtk::Allocation& alloc){
         int parent_width = alloc.get_width();
-        frame->set_size_request(parent_width * 0.35, 50);
+        frame->set_size_request(parent_width * 0.33, 50);
     });
     frame->set_halign(Gtk::ALIGN_START);
     frame->set_valign(Gtk::ALIGN_START);
@@ -468,7 +468,7 @@ create_info_row(const std::string& title, Gtk::Label*& label) {
 
     // Title label
     auto title_label = Gtk::make_managed<Gtk::Label>(title);
-    title_label->set_size_request(150, -1);
+    title_label->set_size_request(140, -1);
     title_label->set_halign(Gtk::ALIGN_START);
     title_label->set_xalign(0.0);
     box->pack_start(*title_label, Gtk::PACK_SHRINK);
@@ -722,7 +722,11 @@ create_video_interface() {
     // Video display area
     auto video_frame = Gtk::make_managed<Gtk::Frame>();
     video_area = Gtk::make_managed<Gtk::DrawingArea>();
-    video_area->set_size_request(640, 360); // 16:9 ratio (640x360)
+    // 16:9. 600 rather than 640: with 640 the four columns' minimum widths sum
+    // to a hair over 1848 px, so on a 1920-wide laptop panel (1848 px work area)
+    // GTK pushed the Payload Info values off the right edge behind an overlay
+    // scrollbar.
+    video_area->set_size_request(600, 338);
     video_area->set_double_buffered(false);
     
     // Set aspect ratio constraint

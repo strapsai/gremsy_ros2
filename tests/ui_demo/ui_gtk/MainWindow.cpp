@@ -41,6 +41,7 @@ Gtk::Widget*
 MainWindow::
 create_connect_ip(){
     auto frame = Gtk::make_managed<Gtk::Frame>("IP");
+    connect_frame = frame;
     frame->set_halign(Gtk::ALIGN_FILL);
     frame->set_valign(Gtk::ALIGN_CENTER);
     frame->set_margin_top(10);
@@ -196,11 +197,24 @@ update_url_streaming(char* url){
 void
 MainWindow::
 on_ip_entry_changed(){
+    if (!entry_is_ip) return;  // drone-name mode: nothing to derive from the text
     if (payload_tab && ip_entry) {
         std::string ip = ip_entry->get_text();
         // Only update if IP is not empty
         if (!ip.empty()) {
             payload_tab->update_rtsp_url_from_ip(ip);
         }
+    }
+}
+
+void
+MainWindow::
+set_connect_field(const std::string& label, const std::string& placeholder,
+                  const std::string& value, bool is_ip){
+    entry_is_ip = is_ip;
+    if (connect_frame) connect_frame->set_label(label);
+    if (ip_entry) {
+        ip_entry->set_placeholder_text(placeholder);
+        ip_entry->set_text(value);
     }
 }
