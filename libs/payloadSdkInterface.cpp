@@ -1139,11 +1139,23 @@ setGimbalSpeed(float spd_pitch, float spd_roll, float spd_yaw, input_mode_t mode
         case(PAYLOAD_CAMERA_GIMBAL_MODE_RESET):
             attitude.flags = current_attitude_flags | GIMBAL_DEVICE_FLAGS_NEUTRAL;
             break;
+        // LOCAL PATCH (airlab): clear RETRACT/NEUTRAL when selecting an active
+        // mode. current_attitude_flags is refreshed from the gimbal's own
+        // GIMBAL_DEVICE_ATTITUDE_STATUS (see ~line 1771), so while the gimbal is
+        // stowed it reports RETRACT, these branches OR that stale bit straight
+        // back into the next command, and the gimbal can never be commanded out
+        // of the stow -- a self-sustaining latch. Selecting LOCK or FOLLOW means
+        // "active", so RETRACT and NEUTRAL must not survive it.
         case(PAYLOAD_CAMERA_GIMBAL_MODE_LOCK):
-            attitude.flags = current_attitude_flags | GIMBAL_DEVICE_FLAGS_YAW_LOCK;
+            attitude.flags = (current_attitude_flags
+                              & ~(GIMBAL_DEVICE_FLAGS_RETRACT | GIMBAL_DEVICE_FLAGS_NEUTRAL))
+                             | GIMBAL_DEVICE_FLAGS_YAW_LOCK;
             break;
         case(PAYLOAD_CAMERA_GIMBAL_MODE_FOLLOW):
-            attitude.flags = current_attitude_flags & (~GIMBAL_DEVICE_FLAGS_YAW_LOCK);
+            attitude.flags = current_attitude_flags
+                             & ~(GIMBAL_DEVICE_FLAGS_YAW_LOCK
+                                 | GIMBAL_DEVICE_FLAGS_RETRACT
+                                 | GIMBAL_DEVICE_FLAGS_NEUTRAL);
             break;
         case(PAYLOAD_CAMERA_GIMBAL_MODE_MAPPING):
             #define MESSAGE_FLAG_MAPPING 0x4000
@@ -1690,6 +1702,18 @@ _handle_msg_camera_settings(mavlink_message_t* msg){
 void
 PayloadSdkInterface::
 _handle_msg_mount_orientation(mavlink_message_t* msg){
+    // Several components share this link (camera, payload, gimbal) and more
+    // than one emits MOUNT_ORIENTATION; only the gimbal's stream carries the
+    // real attitude — others send zeroed fields. Accept the gimbal's only.
+    if(msg->compid != MAV_COMP_ID_GIMBAL
+        && msg->compid != MAV_COMP_ID_GIMBAL2
+        && msg->compid != MAV_COMP_ID_GIMBAL3
+        && msg->compid != MAV_COMP_ID_GIMBAL4
+        && msg->compid != MAV_COMP_ID_GIMBAL5
+        && msg->compid != MAV_COMP_ID_GIMBAL6){
+        return;
+    }
+
     mavlink_mount_orientation_t packet;
     mavlink_msg_mount_orientation_decode(msg, &packet);
 
