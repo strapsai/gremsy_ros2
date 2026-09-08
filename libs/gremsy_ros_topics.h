@@ -46,8 +46,16 @@ constexpr const char* CMD_TRACK_MODE           = "cmd/track_mode";            //
 constexpr const char* CMD_TRACK_TOUCH          = "cmd/track_touch";           // geometry_msgs/Vector3 (x,y pixels)
 constexpr const char* CMD_TRACK                = "cmd/track";                 // std_msgs/Int32
 // Gimbal
-constexpr const char* CMD_GIMBAL_TILT          = "cmd/gimbal_tilt";           // std_msgs/Float64 (deg/s)
-constexpr const char* CMD_GIMBAL_PAN           = "cmd/gimbal_pan";            // std_msgs/Float64 (deg/s)
+//
+// TILT and PAN are SINGLE-AXIS BY CONSTRUCTION, and that is not an oversight in
+// the caller. Both land in one setGimbalSpeed(pitch, roll, yaw, INPUT_SPEED)
+// call that carries a complete 3-axis setpoint, so tilt forces yaw to 0 and pan
+// forces pitch to 0. Publishing both to get diagonal motion does not work --
+// the two messages alternate and each zeroes the axis the other just set. Use
+// CMD_GIMBAL_RATE for two axes at once.
+constexpr const char* CMD_GIMBAL_TILT          = "cmd/gimbal_tilt";           // std_msgs/Float64 (deg/s), pitch only; yaw forced to 0
+constexpr const char* CMD_GIMBAL_PAN           = "cmd/gimbal_pan";            // std_msgs/Float64 (deg/s), yaw only; pitch forced to 0
+constexpr const char* CMD_GIMBAL_RATE          = "cmd/gimbal_rate";           // geometry_msgs/Vector3 (pitch,roll,yaw deg/s) -- all axes at once
 constexpr const char* CMD_GIMBAL_ANGLE         = "cmd/gimbal_angle";          // geometry_msgs/Vector3 (pitch,roll,yaw deg)
 constexpr const char* CMD_GIMBAL_MODE          = "cmd/gimbal_mode";           // std_msgs/Int32
 // Misc / generic full-API passthrough
