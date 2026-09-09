@@ -490,36 +490,16 @@ private:
       my_payload->setPayloadObjectTrackingPosition(static_cast<int>(m.x), static_cast<int>(m.y), 128, 128); }));
     subs_.push_back(sub<Int32>(CMD_TRACK, [](const Int32& m){ my_payload->setPayloadObjectTrackingMode(m.data); }));
 
-    // Gimbal.
-    //
-    // EVERY ONE OF THESE ASSERTS THE MODE FIRST, and that is not defensive
-    // padding. setGimbalSpeed derives its GIMBAL_DEVICE flags from the SDK
-    // global current_gimbal_mode, which EVERY camera-parameter write clobbers
-    // (libs/payloadSdkInterface.cpp:184) -- and the constants collide exactly:
-    // PAYLOAD_CAMERA_VIDEO_ZOOM_MODE_COMBINE, ZOOM_COMBINE_1X and
-    // PAYLOAD_CAMERA_GIMBAL_MODE_OFF are all 0, and GIMBAL_MODE_OFF maps to
-    // GIMBAL_DEVICE_FLAGS_RETRACT, the stow command. So a zoom write followed
-    // by any of these asked the payload to retract, self-sustainingly, with
-    // nothing in the logs. onGimbalCommand and move_gimbal_angle have always
-    // asserted it; the three below (tilt, pan, angle) did NOT, which left the
-    // rate paths -- the ones spirit_person_servo drives -- stowable by an
-    // unrelated zoom write. ensureGimbalMode early-returns unless the mode has
-    // been dirtied or the re-assert interval has elapsed, so a 20 Hz servo does
-    // not hammer the payload with parameter writes.
+    // Gimbal. All assert the mode first: any camera write clobbers the SDK's
+    // current_gimbal_mode, and OFF(0) maps to RETRACT. See the README.
     subs_.push_back(sub<Float64>(CMD_GIMBAL_TILT, [this](const Float64& m){
       ensureGimbalMode();
       my_payload->setGimbalSpeed(m.data, 0, 0, INPUT_SPEED); }));
     subs_.push_back(sub<Float64>(CMD_GIMBAL_PAN, [this](const Float64& m){
       ensureGimbalMode();
       my_payload->setGimbalSpeed(0, 0, m.data, INPUT_SPEED); }));
-    // Two-axis rate. The single-axis topics above cannot be combined -- each
-    // sends a full 3-axis setpoint, so publishing both alternates and cancels
-    // -- which made rate servoing on pitch AND yaw impossible through the
-    // topics that existed. Mirrors CMD_GIMBAL_ANGLE's argument order exactly,
-    // in deg/s rather than deg. NOTE there is no command timeout in the
-    // payload: a rate persists until it is replaced, so whoever publishes here
-    // owns stopping it (spirit_person_servo repeats its zero, and ships a
-    // separate deadman node for the case where it is killed mid-slew).
+    // Two axes at once; tilt/pan above each send a full 3-axis setpoint and
+    // cancel. No command timeout in the payload: the publisher owns stopping.
     subs_.push_back(sub<Vector3>(CMD_GIMBAL_RATE, [this](const Vector3& m){
       ensureGimbalMode();
       my_payload->setGimbalSpeed(m.x, m.y, m.z, INPUT_SPEED); }));  // (pitch, roll, yaw) deg/s
