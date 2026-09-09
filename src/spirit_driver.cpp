@@ -490,10 +490,21 @@ private:
       my_payload->setPayloadObjectTrackingPosition(static_cast<int>(m.x), static_cast<int>(m.y), 128, 128); }));
     subs_.push_back(sub<Int32>(CMD_TRACK, [](const Int32& m){ my_payload->setPayloadObjectTrackingMode(m.data); }));
 
-    // Gimbal
-    subs_.push_back(sub<Float64>(CMD_GIMBAL_TILT, [](const Float64& m){ my_payload->setGimbalSpeed(m.data, 0, 0, INPUT_SPEED); }));
-    subs_.push_back(sub<Float64>(CMD_GIMBAL_PAN, [](const Float64& m){ my_payload->setGimbalSpeed(0, 0, m.data, INPUT_SPEED); }));
-    subs_.push_back(sub<Vector3>(CMD_GIMBAL_ANGLE, [](const Vector3& m){
+    // Gimbal. All assert the mode first: any camera write clobbers the SDK's
+    // current_gimbal_mode, and OFF(0) maps to RETRACT. See the README.
+    subs_.push_back(sub<Float64>(CMD_GIMBAL_TILT, [this](const Float64& m){
+      ensureGimbalMode();
+      my_payload->setGimbalSpeed(m.data, 0, 0, INPUT_SPEED); }));
+    subs_.push_back(sub<Float64>(CMD_GIMBAL_PAN, [this](const Float64& m){
+      ensureGimbalMode();
+      my_payload->setGimbalSpeed(0, 0, m.data, INPUT_SPEED); }));
+    // Two axes at once; tilt/pan above each send a full 3-axis setpoint and
+    // cancel. No command timeout in the payload: the publisher owns stopping.
+    subs_.push_back(sub<Vector3>(CMD_GIMBAL_RATE, [this](const Vector3& m){
+      ensureGimbalMode();
+      my_payload->setGimbalSpeed(m.x, m.y, m.z, INPUT_SPEED); }));  // (pitch, roll, yaw) deg/s
+    subs_.push_back(sub<Vector3>(CMD_GIMBAL_ANGLE, [this](const Vector3& m){
+      ensureGimbalMode();
       my_payload->setGimbalSpeed(m.x, m.y, m.z, INPUT_ANGLE); }));  // (pitch, roll, yaw)
     // An operator setting the mode also becomes the mode we ASSERT from here
     // on. Without this the next attitude command would re-assert the configured
