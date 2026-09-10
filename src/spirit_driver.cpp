@@ -642,10 +642,19 @@ private:
   // 1262-1271), and the C_V_ZM_CB_LV combine-factor parameter takes a discrete
   // ladder index. Both were tried on nx3 and neither moved the lens.
   //
-  // MEASURED ON THIS PAYLOAD, 2026-08-19: the scale is INVERTED relative to the
-  // MAVLink convention. The spec says 0 = wide and 100 = tele; here a LOWER
-  // value is MORE zoomed in (50 is tighter than 75). Do not "fix" this to match
-  // the spec without re-checking on the aircraft.
+  // MEASURED ON gremsy-3 (.23), 2026-08-25, CONFIRMED 2026-09-10: the scale
+  // follows the MAVLink convention after all -- HIGHER is MORE zoomed in:
+  //   range 1 -> 1.2115x, 50 -> 17.78x, 100 -> 240x (EO magnification).
+  // The 2026-08-19 note here claimed the opposite (LOWER tighter, "50 is
+  // tighter than 75"); that was measured on the payload this one replaced. If
+  // the gimbal is swapped again, RE-MEASURE rather than trusting either claim:
+  //   ros2 topic pub -r 10 /<drone>/gremsy/cmd/zoom_range std_msgs/msg/Float64 '{data: 100.0}'
+  //   ros2 topic echo /<drone>/gremsy/params/eo_zoom
+  // A zoom that does not move at all is NOT a scale question -- it is the camera
+  // subsystem never having been set up: checkPayloadConnection(), RC_MODE and
+  // ZOOM_MODE below all run ONCE in the constructor, so a driver that started
+  // before the payload's camera was ready drops every camera command silently
+  // for the rest of its life. Restart the driver. (docs/spirit-hardware-issues.md 3.2)
   void setZoomRange(float range)
   {
     my_payload->setCameraZoom(ZOOM_TYPE_RANGE, range);
@@ -663,8 +672,11 @@ private:
   // the video. The only other publisher of this field is the basestation's
   // manual path, which sends 0.0 and is unaffected.
   //
-  // Because 0.0 is the no-op sentinel, an exact 0.0 range (maximum tele) is not
-  // reachable; use a small positive value.
+  // Because 0.0 is the no-op sentinel, an exact 0.0 range is not reachable
+  // here -- and on the confirmed scale 0.0 is maximum WIDE (measured 1.0000x),
+  // i.e. the sentinel sits exactly on the value the boot/idle/survey aim wants.
+  // (The old comment called 0.0 "maximum tele", which had the scale backwards.)
+  // Use a small positive value: 0.001 measures 1.0000x and clears the gate.
   //
   // The gimbal pointer streams commands at 5 Hz, so re-sends are rate-limited.
   // A change is sent promptly (at most once a second); an UNCHANGED value is
