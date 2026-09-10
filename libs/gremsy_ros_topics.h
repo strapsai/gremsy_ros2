@@ -45,9 +45,11 @@ constexpr const char* CMD_LRF_MODE             = "cmd/lrf_mode";              //
 constexpr const char* CMD_TRACK_MODE           = "cmd/track_mode";            // std_msgs/Int32
 constexpr const char* CMD_TRACK_TOUCH          = "cmd/track_touch";           // geometry_msgs/Vector3 (x,y pixels)
 constexpr const char* CMD_TRACK                = "cmd/track";                 // std_msgs/Int32
-// Gimbal
-constexpr const char* CMD_GIMBAL_TILT          = "cmd/gimbal_tilt";           // std_msgs/Float64 (deg/s)
-constexpr const char* CMD_GIMBAL_PAN           = "cmd/gimbal_pan";            // std_msgs/Float64 (deg/s)
+// Gimbal. TILT/PAN each send a full 3-axis setpoint, so they cancel if both
+// are published -- use CMD_GIMBAL_RATE for two axes.
+constexpr const char* CMD_GIMBAL_TILT          = "cmd/gimbal_tilt";           // std_msgs/Float64 (deg/s), pitch only; yaw forced to 0
+constexpr const char* CMD_GIMBAL_PAN           = "cmd/gimbal_pan";            // std_msgs/Float64 (deg/s), yaw only; pitch forced to 0
+constexpr const char* CMD_GIMBAL_RATE          = "cmd/gimbal_rate";           // geometry_msgs/Vector3 (pitch,roll,yaw deg/s) -- all axes at once
 constexpr const char* CMD_GIMBAL_ANGLE         = "cmd/gimbal_angle";          // geometry_msgs/Vector3 (pitch,roll,yaw deg)
 constexpr const char* CMD_GIMBAL_MODE          = "cmd/gimbal_mode";           // std_msgs/Int32
 // Misc / generic full-API passthrough
