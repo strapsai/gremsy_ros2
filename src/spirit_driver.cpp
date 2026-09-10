@@ -660,9 +660,18 @@ private:
     my_payload->setCameraZoom(ZOOM_TYPE_RANGE, range);
   }
 
-  // Wire contract for GimbalCommand.zoom: 0.0 = no zoom action (the value the
-  // basestation's manual set_gimbal_angle path has always sent, so it must
-  // stay a no-op), anything in (0, 100] = an absolute ZOOM RANGE POSITION.
+  // Wire contract for GimbalCommand.zoom: NEGATIVE = no zoom action, anything in
+  // [0, 100] = an absolute ZOOM RANGE POSITION. 0.0 is a REAL, COMMANDABLE value
+  // -- it is true 1.0000x, the widest the lens goes, which is exactly what the
+  // boot/idle/survey aim wants. It used to be the no-op sentinel, which made the
+  // one value meaning "fully wide" the one value that could not be sent; the
+  // configs worked around it with 1.0 and flew every survey at 1.2116x instead.
+  // The basestation's manual set_gimbal_angle path sends the sentinel (see
+  // dtc_robot_basestation_logic/src/spirit_logic.cpp) so a manual aim still
+  // leaves an operator's zoom alone. DEPLOY ORDER MATTERS: ship the basestation
+  // first. Old basestation + new driver = its 0.0 snaps the lens to 1x on every
+  // manual aim; new basestation + old driver = its negative fails the old
+  // `<= 0.0` test and is still a no-op, which is safe.
   //
   // NOT a magnification. The field used to be documented as a zoom level and
   // carried 4.0 meaning "4x"; it now carries a payload range position where
@@ -672,11 +681,9 @@ private:
   // the video. The only other publisher of this field is the basestation's
   // manual path, which sends 0.0 and is unaffected.
   //
-  // Because 0.0 is the no-op sentinel, an exact 0.0 range is not reachable
-  // here -- and on the confirmed scale 0.0 is maximum WIDE (measured 1.0000x),
-  // i.e. the sentinel sits exactly on the value the boot/idle/survey aim wants.
-  // (The old comment called 0.0 "maximum tele", which had the scale backwards.)
-  // Use a small positive value: 0.001 measures 1.0000x and clears the gate.
+  // MEASURED bottom of the scale, gremsy-3 2026-09-10: range 0.0 -> 1.0000x,
+  // 0.001 -> 1.0000x, 0.01 -> 1.0020x, 0.1 -> 1.0209x, 1.0 -> 1.2116x. So 0.0 is
+  // maximum WIDE, not "maximum tele" as an earlier comment here claimed.
   //
   // The gimbal pointer streams commands at 5 Hz, so re-sends are rate-limited.
   // A change is sent promptly (at most once a second); an UNCHANGED value is
@@ -687,7 +694,8 @@ private:
   // whole inspection and never retried.
   void applyZoom(float zoom)
   {
-    if (my_payload == nullptr || zoom <= 0.0f) {
+    // Negative is the no-op sentinel; 0.0 is a real command (true 1x wide).
+    if (my_payload == nullptr || zoom < 0.0f) {
       return;
     }
     if (zoom > 100.0f) {
