@@ -53,11 +53,20 @@ constexpr bool sender_is_gimbal(std::uint8_t compid)
 /// the normal case in level flight. Only a field set that was never written is
 /// exactly zero on all three axes at once.
 ///
-/// That measurement also settles why this check is not redundant with the
-/// sender whitelist. The binary running on the aircraft at the time ALREADY
-/// had the compid filter, and 14% of samples were still zero triples -- so the
-/// zeros arrive from inside the gimbal component id range and no sender-based
-/// rule can remove them.
+/// Is this check redundant with the sender whitelist? On spiritnx3, measured
+/// 2026-09-14: YES, so far. The zeros come from compid 1 -- the AUTOPILOT --
+/// which emits MOUNT_ORIENTATION with every field zeroed, while the real
+/// attitude comes from compid 154 (MAV_COMP_ID_GIMBAL). With the filter
+/// actually running, the published rate of zero triples went from 14% to zero
+/// and the zero_triple tally has never incremented.
+///
+/// It is kept anyway, cheaply, because the whitelist is an assumption about
+/// which components exist on this link and the tally is what will prove the
+/// assumption on any other airframe: if zero_triple stays 0 there too, this
+/// check can be dropped on evidence. (An earlier note here claimed the zeros
+/// survived the compid filter. That was wrong -- it inferred from build
+/// timestamps that the flying binary contained the filter, when the runtime
+/// behaviour shows it did not. Test the binary, not the mtime.)
 inline AttitudeVerdict classify_attitude(std::uint8_t compid,
                                          float roll, float pitch, float yaw)
 {
