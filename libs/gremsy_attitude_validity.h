@@ -44,12 +44,20 @@ constexpr bool sender_is_gimbal(std::uint8_t compid)
 /// most specific), then the protocol's NaN marker, then the zero triple.
 ///
 /// The zero test is an EXACT float comparison, deliberately, and an epsilon
-/// here would be a bug. A real gimbal rests with a few hundredths of a degree
-/// of bias on every axis and dithers in the low mantissa bits sample to
-/// sample; an epsilon wide enough to matter would throw away true readings of
-/// a very nearly level camera, which is the normal case in level flight. Only
-/// a field set that was never written is exactly zero on all three axes at
-/// once.
+/// here would be a bug. Measured on spiritnx3 2026-09-14 by commanding the
+/// gimbal to exactly level and holding it 25 s: of 143 samples, 123 were real
+/// and NOT ONE had any axis exactly 0.0 -- the tightest was pitch at 0.0075
+/// deg, with roll 0.071 and yaw 9.80 deg out. The other 20 were exact zero
+/// triples. So the two populations are cleanly separated, and an epsilon loose
+/// enough to catch the zeros would discard a genuinely level camera, which is
+/// the normal case in level flight. Only a field set that was never written is
+/// exactly zero on all three axes at once.
+///
+/// That measurement also settles why this check is not redundant with the
+/// sender whitelist. The binary running on the aircraft at the time ALREADY
+/// had the compid filter, and 14% of samples were still zero triples -- so the
+/// zeros arrive from inside the gimbal component id range and no sender-based
+/// rule can remove them.
 inline AttitudeVerdict classify_attitude(std::uint8_t compid,
                                          float roll, float pitch, float yaw)
 {

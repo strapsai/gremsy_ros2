@@ -13,6 +13,17 @@ static int checks = 0;
 #define CHECK(cond) do { ++checks; if(!(cond)) { \
   printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 
+// The adversarial case, measured on the real payload the same day: the gimbal
+// COMMANDED to exactly level (cmd/gimbal_angle 0,0,0) and held there 25 s.
+// 143 samples arrived; 123 were real and 20 were zero triples. Not one real
+// sample had ANY axis exactly 0.0. These are the extremes of the real 123 --
+// the tightest a true reading ever came to the guard.
+static const float kCommandedLevel[][3] = {
+  {0.070788f, -0.007492f, -9.799805f},   // closest pitch to zero seen
+  {0.078324f, -0.015011f, -9.931641f},
+  {0.070788f, -0.015011f, -9.799805f},   // per-axis worst case, combined
+};
+
 // Real samples captured off /gimbal_orientation on spiritnx3, 2026-09-14, with
 // the aircraft disarmed and the gimbal at rest. (roll, pitch, yaw) degrees.
 static const float kRealSamples[][3] = {
@@ -71,6 +82,21 @@ int main()
   // ---- real readings must still be accepted --------------------------------
   for (const auto& s : kRealSamples) {
     CHECK(classify_attitude(GIMBAL, s[0], s[1], s[2]) == AttitudeVerdict::Accept);
+  }
+
+  // ---- and the adversarial case: told to be level, it still is not zero ----
+  // This is what makes the exact comparison correct and an epsilon wrong. The
+  // tightest real pitch was 0.0075 deg from zero; any epsilon big enough to
+  // call that "zero" would discard a genuinely level camera, which is the
+  // normal case in level flight. Exactness is the whole point.
+  for (const auto& s : kCommandedLevel) {
+    CHECK(classify_attitude(GIMBAL, s[0], s[1], s[2]) == AttitudeVerdict::Accept);
+  }
+  {
+    const float tightest_pitch = 0.007492f;
+    CHECK(tightest_pitch != 0.0f);
+    // A 0.01 deg epsilon -- a very tight one -- already swallows it.
+    CHECK(std::fabs(tightest_pitch) < 0.01f);
   }
 
   // ---- how close does a REAL resting sample get to the zero triple? --------
