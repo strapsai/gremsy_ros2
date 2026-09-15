@@ -406,6 +406,28 @@ create_ir_palette_group() {
 
     box->pack_start(*hbox, Gtk::PACK_EXPAND_WIDGET);
 
+    // IR zoom. The thermal core has a FIXED lens, so this is digital zoom only
+    // -- a crop-and-scale, not an optical change. The payload takes eight
+    // discrete steps (ZOOM_IR_1X..ZOOM_IR_8X = 0..7) and nothing in between,
+    // which is why these are buttons rather than a slider: a slider would
+    // imply intermediate values the payload cannot accept.
+    //
+    // NOTE for anyone mapping with IR: zooming changes the effective
+    // intrinsics, and the UFM vehicle yaml carries one fixed set calibrated at
+    // 1x. Leave this at 1x during a mapping run unless the level is recorded
+    // and compensated.
+    auto zbox = Gtk::make_managed<Gtk::Box>(Gtk::ORIENTATION_HORIZONTAL, 5);
+    zbox->set_margin_top(10);
+    zbox->set_margin_bottom(10);
+    zbox->set_margin_start(10);
+    zbox->set_margin_end(10);
+    zbox->pack_start(*Gtk::make_managed<Gtk::Label>("IR Zoom"), Gtk::PACK_SHRINK);
+    for (int step = 0; step < 8; ++step) {
+        add_button_to_box(*zbox, std::to_string(step + 1) + "x", CAM_IR_ZOOM,
+                          static_cast<double>(step));
+    }
+    box->pack_start(*zbox, Gtk::PACK_EXPAND_WIDGET);
+
     frame->add(*box);
     return frame;
 }

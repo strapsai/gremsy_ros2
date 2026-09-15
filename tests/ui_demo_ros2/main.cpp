@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <functional>
 #include <mutex>
@@ -109,6 +110,28 @@ public:
     bind(drone);
   }
 
+  // Called between spins. The boot IR zoom CANNOT be sent from bind(): the
+  // publisher is created there, and a publish issued before DDS has matched
+  // the driver's subscription is dropped on the floor with no error -- which
+  // is exactly what happened the first time (payload stayed at ~7x). So wait
+  // for a matched subscriber, then send once. Bounded, because a driver that
+  // never appears must not leave this retrying forever.
+  void service_boot_ir_zoom()
+  {
+    if (!boot_ir_zoom_pending_ || !set_cam_param_pub_) return;
+    if (set_cam_param_pub_->get_subscription_count() == 0) {
+      if (std::chrono::steady_clock::now() - boot_ir_zoom_since_ > std::chrono::seconds(15)) {
+        boot_ir_zoom_pending_ = false;
+        fprintf(stderr, "ui_demo_ros2: no subscriber on cmd/set_camera_param after 15s; "
+                        "IR zoom NOT reset to 1x (is spirit_driver running?)\n");
+      }
+      return;
+    }
+    boot_ir_zoom_pending_ = false;
+    pubIrZoom(0);
+    fprintf(stderr, "ui_demo_ros2: IR zoom reset to 1x on connect\n");
+  }
+
   std::string drone() const { std::lock_guard<std::mutex> lk(mtx_); return drone_; }
 
   // GTK-thread callback: translate a UI control event into a ROS2 command.
@@ -147,6 +170,7 @@ public:
       case GIMBAL_CONTROL_PAN:       pubFloat(gimbal_pan_pub_, param[0]); break;
       case GIMBAL_CONTROL_ANGLE:     pubVec(gimbal_angle_pub_, param[0], param[1], param[2]); break;
       case GIMBAL_MODE:              pubInt(gimbal_mode_pub_, (int)param[0]); break;
+      case CAM_IR_ZOOM:              pubIrZoom((int)param[0]); break;
       case QUERY_PAYLOAD_PARAM:      query_params_pub_->publish(std_msgs::msg::Empty()); break;
       default: break;
     }
@@ -196,6 +220,7 @@ private:
     gimbal_angle_pub_ = node_->create_publisher<geometry_msgs::msg::Vector3>(t(CMD_GIMBAL_ANGLE), 10);
     gimbal_mode_pub_ = node_->create_publisher<std_msgs::msg::Int32>(t(CMD_GIMBAL_MODE), 10);
     query_params_pub_ = node_->create_publisher<std_msgs::msg::Empty>(t(CMD_QUERY_PARAMS), 10);
+    set_cam_param_pub_ = node_->create_publisher<std_msgs::msg::String>(t(CMD_SET_CAMERA_PARAM), 10);
 
     // ---- Telemetry subscriptions (drone -> ground) ----
     gimbal_orientation_sub_ = node_->create_subscription<geometry_msgs::msg::Vector3>(
@@ -266,6 +291,28 @@ private:
 
     // Prompt the driver to re-emit camera info/settings so the UI populates.
     query_params_pub_->publish(std_msgs::msg::Empty());
+
+    // Always start at IR 1x. The payload keeps whatever digital zoom the last
+    // run left it in, and a thermal frame that is silently 4x cropped looks
+    // like a working camera pointed somewhere else. Same argument as the
+    // driver's boot zoom for EO, but this one lives here because the UI is the
+    // only thing that knows an operator just took the camera.
+    boot_ir_zoom_pending_ = true;
+    boot_ir_zoom_since_ = std::chrono::steady_clock::now();
+  }
+
+  // IR zoom rides the generic passthrough rather than a dedicated topic, so it
+  // works against the driver that is ALREADY deployed -- no aircraft change.
+  // "C_T_ZOOM" is PAYLOAD_CAMERA_IR_ZOOM_FACTOR; the value is the step index
+  // (ZOOM_IR_1X..ZOOM_IR_8X = 0..7), not a magnification.
+  void pubIrZoom(int step)
+  {
+    if (!set_cam_param_pub_) return;
+    if (step < 0) step = 0;
+    if (step > 7) step = 7;
+    std_msgs::msg::String m;
+    m.data = "C_T_ZOOM " + std::to_string(step);
+    set_cam_param_pub_->publish(m);
   }
 
   void pubInt(const rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr& p, int v)
@@ -296,6 +343,9 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr gimbal_orientation_sub_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr> param_subs_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr set_cam_param_pub_;
+  bool boot_ir_zoom_pending_ = false;
+  std::chrono::steady_clock::time_point boot_ir_zoom_since_{};
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr cam_param_sub_, stream_uri_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr storage_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr capture_sub_;
@@ -415,6 +465,7 @@ int main(int argc, char* argv[])
     exec.add_node(node);
     while (running && rclcpp::ok()) {
       ros_bridge.service_reconnect();
+      ros_bridge.service_boot_ir_zoom();
       exec.spin_some(std::chrono::milliseconds(50));
     }
   });
