@@ -4,9 +4,10 @@
 This is intentionally SEPARATE from spirit_triage.launch.py: the UI must NOT come
 up with the driver / on container restart. Launch it on demand.
 
-It runs under the same namespace as spirit_driver (default /<drone>/gremsy) and
-reads the same per-drone config so its pre-existing-topic subscriptions
-(gimbal_orientation) match the driver.
+The UI addresses the drone by NAME: on Connect it binds every topic to
+/<drone>/gremsy/... (absolute), so the node namespace no longer has to match
+the driver's. It still reads the same per-drone config so its pre-existing-topic
+subscriptions (gimbal_orientation) match the driver.
 
 Args:
   drone         Robot name; selects config/<drone>.yaml (default $ROBOT_NAME|spiritnx3).
@@ -14,8 +15,9 @@ Args:
   namespace     Full node namespace (default /<topic_prefix>/gremsy).
   config_file   Override the per-drone config file path.
 
-Note: this only launches the ROS node. To make the window appear on your laptop,
-run it through X11 forwarding -- see scripts/run_ui_demo_ros2.sh.
+Intended to run ON THE GROUND MACHINE (x86 container, see launch/spirit/x86.env
+and the dtc-drivers-ui service) with only ROS2/DDS crossing the network. It can
+also run on the robot over X11 forwarding (scripts/run_ui_demo_ros2.sh).
 """
 
 import os
@@ -34,9 +36,17 @@ def _launch_setup(context, *args, **kwargs):
 
     config_file = LaunchConfiguration('config_file').perform(context)
     if not config_file:
+        # Same order as spirit_triage.launch.py: fleet-level file, then the
+        # package copy — the UI must read whatever the driver read.
+        fleet = os.path.join(os.environ.get('AIRLAB_PATH', ''),
+                             'config', 'spirit_drivers', f'{drone}.yaml')
         share = get_package_share_directory('gremsy_ros2')
-        config_file = os.path.join(share, 'config', f'{drone}.yaml')
+        packaged = os.path.join(share, 'config', f'{drone}.yaml')
+        config_file = fleet if os.path.isfile(fleet) else packaged
     parameters = [config_file] if os.path.isfile(config_file) else []
+    # The drone name prefills the UI's "Drone" field and selects the
+    # /<drone>/gremsy topic tree it binds to on Connect.
+    parameters.append({'drone': drone})
 
     node = Node(
         package='gremsy_ros2',
