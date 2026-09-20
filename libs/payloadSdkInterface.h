@@ -362,8 +362,12 @@ private:
 
     bool is_send_stream_request = false;
 
-    uint32_t current_gimbal_mode;
-    uint16_t current_attitude_flags;
+    // Gimbal's follow/lock state: seeded with the power-on default and kept in
+    // sync from the GIMBAL_DEVICE_ATTITUDE_STATUS flags the gimbal streams.
+    // Selects yaw (body-relative) vs yaw_absolute (Earth-frame) when relaying
+    // MOUNT_ORIENTATION.
+    uint32_t current_gimbal_mode = PAYLOAD_CAMERA_GIMBAL_MODE_FOLLOW;
+    uint16_t current_attitude_flags = 0;
     
     std::map<uint16_t, StatusTextBuffer> statustext_buffers;
 public:
