@@ -26,6 +26,14 @@ public:
     void send_connected();
     void send_disconnected();
 
+    // Repurpose the connect field. The original UI talks UDP to a payload IP;
+    // the ROS2 client connects to a *drone* (its topic namespace), so the
+    // frame label, placeholder and prefilled text become e.g. "Drone" /
+    // "spiritnx3". is_ip=false also stops the entry from being rewritten into
+    // an RTSP URL on every keystroke (that only makes sense for an IP).
+    void set_connect_field(const std::string& label, const std::string& placeholder,
+                           const std::string& value, bool is_ip);
+
     // Method to update information tab
     void update_storage_info(int status, double total, double used, double available);
     void update_capture_info(int img_status, int video_status, int img_count, int rec_time_ms);
@@ -41,7 +49,9 @@ private:
     Gtk::Box side_box;
     Gtk::Box tab_content;
 
+    Gtk::Frame* connect_frame = nullptr;
     Gtk::Entry* ip_entry = nullptr;
+    bool entry_is_ip = true;
     Gtk::Label* connect_info = nullptr;
     Gtk::Button* btn_connect = nullptr;
     

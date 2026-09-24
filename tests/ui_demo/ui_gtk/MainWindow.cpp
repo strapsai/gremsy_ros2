@@ -5,6 +5,9 @@
 MainWindow::MainWindow(int width, int height) {
     set_title("Payload UI Demo");
     set_default_size(width, height);
+    // Only a floor, not a demand: the tab content already scrolls, so the
+    // operator can drag the window down to something that fits a laptop.
+    set_size_request(720, 480);
 
     // Config main box
     main_box.set_orientation(Gtk::ORIENTATION_VERTICAL);
@@ -41,6 +44,7 @@ Gtk::Widget*
 MainWindow::
 create_connect_ip(){
     auto frame = Gtk::make_managed<Gtk::Frame>("IP");
+    connect_frame = frame;
     frame->set_halign(Gtk::ALIGN_FILL);
     frame->set_valign(Gtk::ALIGN_CENTER);
     frame->set_margin_top(10);
@@ -66,12 +70,18 @@ create_connect_ip(){
     btn_connect->set_size_request(150, -1);
     btn_connect->signal_clicked().connect([this]() {
         if(!is_connected){
-            printf("debug 1\n");
-            std::string ip = ip_entry->get_text();
-            on_connect_button_clicked(CONNECT_PAYLOAD, ip.c_str());
+            std::string target = ip_entry->get_text();
+            if(target.empty()){
+                // Nothing to bind to: stay disconnected so the controls stay dead
+                // rather than publishing into a namespace nobody named.
+                if(connect_info != nullptr){
+                    connect_info->set_markup("<span color='orange'>  Enter a target first </span>");
+                }
+                return;
+            }
+            on_connect_button_clicked(CONNECT_PAYLOAD, target.c_str());
         }
         else{
-            printf("debug 2\n");
             on_connect_button_clicked(DISCONNECT_PAYLOAD, "");
         }
 
@@ -123,6 +133,12 @@ send_connected(){
     if(btn_connect != nullptr){
         btn_connect->set_label("Disconnect");
     }
+    // The bound topics carry the text as it was when Connect was pressed; let it
+    // be edited again only after Disconnect, so the field never disagrees with
+    // what the app is actually talking to.
+    if(ip_entry != nullptr){
+        ip_entry->set_sensitive(false);
+    }
     if(payload_tab != nullptr){
         payload_tab->set_sensitive(true);
         payload_tab->send_connected();
@@ -138,6 +154,9 @@ send_disconnected(){
     }
     if(btn_connect != nullptr){
         btn_connect->set_label("Connect");
+    }
+    if(ip_entry != nullptr){
+        ip_entry->set_sensitive(true);
     }
     if(payload_tab != nullptr){
         payload_tab->set_sensitive(false);
@@ -196,11 +215,24 @@ update_url_streaming(char* url){
 void
 MainWindow::
 on_ip_entry_changed(){
+    if (!entry_is_ip) return;  // drone-name mode: nothing to derive from the text
     if (payload_tab && ip_entry) {
         std::string ip = ip_entry->get_text();
         // Only update if IP is not empty
         if (!ip.empty()) {
             payload_tab->update_rtsp_url_from_ip(ip);
         }
+    }
+}
+
+void
+MainWindow::
+set_connect_field(const std::string& label, const std::string& placeholder,
+                  const std::string& value, bool is_ip){
+    entry_is_ip = is_ip;
+    if (connect_frame) connect_frame->set_label(label);
+    if (ip_entry) {
+        ip_entry->set_placeholder_text(placeholder);
+        ip_entry->set_text(value);
     }
 }

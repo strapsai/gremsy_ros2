@@ -19,6 +19,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -101,6 +102,14 @@ public:
     //     follow <-> gimbal_yaw_frame: body       (yaw relative to the airframe)
     //     lock   <-> gimbal_yaw_frame: absolute   (yaw is a compass heading)
     // Flipping one without the other points the camera at the wrong bearing.
+    // One send of the wide zoom at boot, so the camera does not start at
+    // whatever the last run left it in. Same key the pointer reads, and a
+    // range POSITION not a magnification (0.0 = true 1x; 1.0 is already
+    // 1.2116x). NaN disables it. This is the driver's job, not the pointer's:
+    // gimbal_pointing only commands inside GUIDED now, so on the ground -- the
+    // exact moment you want a known zoom -- it is deliberately silent.
+    boot_zoom_range_ = this->declare_parameter<double>("boot_zoom_range",
+                                                       std::numeric_limits<double>::quiet_NaN());
     const std::string mode_name = this->declare_parameter<std::string>("gimbal_mode", "follow");
     if (mode_name == "lock") {
       gimbal_mode_ = PAYLOAD_CAMERA_GIMBAL_MODE_LOCK;
@@ -184,7 +193,7 @@ public:
     // Publish the fused Position + GimbalState at 10 Hz (matches the Lion cadence).
     position_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(100),
-      [this]() { publish_position(); publish_gimbal_state(); publish_lrf(); });
+      [this]() { sendBootZoomOnce(); publish_position(); publish_gimbal_state(); publish_lrf(); });
 
     RCLCPP_INFO(this->get_logger(), "spirit_driver ready; full payload API exposed on ROS2.");
   }
@@ -653,18 +662,36 @@ private:
   // 1262-1271), and the C_V_ZM_CB_LV combine-factor parameter takes a discrete
   // ladder index. Both were tried on nx3 and neither moved the lens.
   //
-  // MEASURED ON THIS PAYLOAD, 2026-08-19: the scale is INVERTED relative to the
-  // MAVLink convention. The spec says 0 = wide and 100 = tele; here a LOWER
-  // value is MORE zoomed in (50 is tighter than 75). Do not "fix" this to match
-  // the spec without re-checking on the aircraft.
+  // MEASURED ON gremsy-3 (.23), 2026-08-25, CONFIRMED 2026-09-10: the scale
+  // follows the MAVLink convention after all -- HIGHER is MORE zoomed in:
+  //   range 1 -> 1.2115x, 50 -> 17.78x, 100 -> 240x (EO magnification).
+  // The 2026-08-19 note here claimed the opposite (LOWER tighter, "50 is
+  // tighter than 75"); that was measured on the payload this one replaced. If
+  // the gimbal is swapped again, RE-MEASURE rather than trusting either claim:
+  //   ros2 topic pub -r 10 /<drone>/gremsy/cmd/zoom_range std_msgs/msg/Float64 '{data: 100.0}'
+  //   ros2 topic echo /<drone>/gremsy/params/eo_zoom
+  // A zoom that does not move at all is NOT a scale question -- it is the camera
+  // subsystem never having been set up: checkPayloadConnection(), RC_MODE and
+  // ZOOM_MODE below all run ONCE in the constructor, so a driver that started
+  // before the payload's camera was ready drops every camera command silently
+  // for the rest of its life. Restart the driver. (docs/spirit-hardware-issues.md 3.2)
   void setZoomRange(float range)
   {
     my_payload->setCameraZoom(ZOOM_TYPE_RANGE, range);
   }
 
-  // Wire contract for GimbalCommand.zoom: 0.0 = no zoom action (the value the
-  // basestation's manual set_gimbal_angle path has always sent, so it must
-  // stay a no-op), anything in (0, 100] = an absolute ZOOM RANGE POSITION.
+  // Wire contract for GimbalCommand.zoom: NEGATIVE = no zoom action, anything in
+  // [0, 100] = an absolute ZOOM RANGE POSITION. 0.0 is a REAL, COMMANDABLE value
+  // -- it is true 1.0000x, the widest the lens goes, which is exactly what the
+  // boot/idle/survey aim wants. It used to be the no-op sentinel, which made the
+  // one value meaning "fully wide" the one value that could not be sent; the
+  // configs worked around it with 1.0 and flew every survey at 1.2116x instead.
+  // The basestation's manual set_gimbal_angle path sends the sentinel (see
+  // dtc_robot_basestation_logic/src/spirit_logic.cpp) so a manual aim still
+  // leaves an operator's zoom alone. DEPLOY ORDER MATTERS: ship the basestation
+  // first. Old basestation + new driver = its 0.0 snaps the lens to 1x on every
+  // manual aim; new basestation + old driver = its negative fails the old
+  // `<= 0.0` test and is still a no-op, which is safe.
   //
   // NOT a magnification. The field used to be documented as a zoom level and
   // carried 4.0 meaning "4x"; it now carries a payload range position where
@@ -674,8 +701,9 @@ private:
   // the video. The only other publisher of this field is the basestation's
   // manual path, which sends 0.0 and is unaffected.
   //
-  // Because 0.0 is the no-op sentinel, an exact 0.0 range (maximum tele) is not
-  // reachable; use a small positive value.
+  // MEASURED bottom of the scale, gremsy-3 2026-09-10: range 0.0 -> 1.0000x,
+  // 0.001 -> 1.0000x, 0.01 -> 1.0020x, 0.1 -> 1.0209x, 1.0 -> 1.2116x. So 0.0 is
+  // maximum WIDE, not "maximum tele" as an earlier comment here claimed.
   //
   // The gimbal pointer streams commands at 5 Hz, so re-sends are rate-limited.
   // A change is sent promptly (at most once a second); an UNCHANGED value is
@@ -684,9 +712,35 @@ private:
   // exactly ONE zoom command per inspection, and if that command was dropped --
   // payload still connecting, camera busy -- the camera stayed wide for the
   // whole inspection and never retried.
+  // Send the boot zoom exactly once, and only once the payload's camera
+  // subsystem has proven it is listening.
+  //
+  // Waiting on have_zoom_ is the whole point. Camera commands issued from the
+  // constructor are dropped silently when the camera comes up after the driver
+  // -- that is the wedge in docs/spirit-hardware-issues.md 3.2, where gimbal
+  // attitude keeps working while every camera command vanishes. have_zoom_
+  // turns true on the first PARAM_EO_ZOOM_LEVEL telemetry, which is proof the
+  // camera is talking, so this fires on the first tick after that and latches.
+  void sendBootZoomOnce()
+  {
+    if (boot_zoom_sent_ || std::isnan(boot_zoom_range_)) {
+      return;
+    }
+    if (!have_zoom_.load()) {
+      return;   // camera not up yet; try again next tick
+    }
+    boot_zoom_sent_ = true;   // latch BEFORE the send: one attempt, not a retry loop
+    applyZoom(static_cast<float>(boot_zoom_range_));
+    RCLCPP_INFO(this->get_logger(),
+                "boot zoom: one send of range %.1f (lower = wider; 0 = true 1x); "
+                "EO optical was %.2fx",
+                boot_zoom_range_, eo_zoom_.load());
+  }
+
   void applyZoom(float zoom)
   {
-    if (my_payload == nullptr || zoom <= 0.0f) {
+    // Negative is the no-op sentinel; 0.0 is a real command (true 1x wide).
+    if (my_payload == nullptr || zoom < 0.0f) {
       return;
     }
     if (zoom > 100.0f) {
@@ -746,6 +800,8 @@ private:
   double lrf_valid_min_m_{5.0}, lrf_valid_max_m_{300.0};
   std::atomic<double> pay_lat_{0.0}, pay_lon_{0.0}, pay_alt_{0.0};
   std::atomic<double> roll_deg_{0.0}, pitch_deg_{0.0}, yaw_deg_{0.0};
+  double boot_zoom_range_ = std::numeric_limits<double>::quiet_NaN();
+  bool boot_zoom_sent_ = false;
   std::atomic<double> eo_zoom_{1.0}, lrf_range_{0.0};
   std::atomic<int> gb_mode_{PAYLOAD_CAMERA_GIMBAL_MODE_OFF};
   std::atomic<bool> have_lat_{false}, have_lon_{false}, have_alt_{false}, have_orientation_{false}, have_zoom_{false}, have_lrf_{false}, have_mode_{false};
