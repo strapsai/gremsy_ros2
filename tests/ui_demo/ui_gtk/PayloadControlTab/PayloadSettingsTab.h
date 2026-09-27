@@ -56,6 +56,10 @@ enum _index_notify{
     CONNECT_PAYLOAD,
     DISCONNECT_PAYLOAD,
     QUERY_PAYLOAD_PARAM,
+    // Appended at the END of the shared block on purpose: these values index
+    // into the handlers, so inserting one mid-list would silently renumber
+    // every command after it.
+    CAM_IR_ZOOM,
 #ifdef MB1
     // MB1-specific controls
     CAM_SETTING_TARGET,

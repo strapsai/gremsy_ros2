@@ -158,6 +158,15 @@ void onUICommandChanged(int event, double* param){
                 my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_IR_PALETTE, (int)param[0], PARAM_TYPE_UINT32);
             break;
         }
+        case CAM_IR_ZOOM:{
+            // Digital zoom on the thermal core (fixed lens), eight discrete
+            // steps ZOOM_IR_1X..ZOOM_IR_8X = 0..7. Wired here as well as in
+            // ui_demo_ros2 because both apps share the widget, and a button
+            // that does nothing is worse than no button.
+            if(my_payload != nullptr)
+                my_payload->setPayloadCameraParam(PAYLOAD_CAMERA_IR_ZOOM_FACTOR, (int)param[0], PARAM_TYPE_UINT32);
+            break;
+        }
         case CAM_IR_FFC_MODE:{
             if(my_payload != nullptr)
                 my_payload->setPayloadCameraFFCMode((int)param[0]);

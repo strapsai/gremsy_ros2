@@ -19,3 +19,10 @@
     #   follow <-> gimbal_yaw_frame: body       lock <-> gimbal_yaw_frame: absolute
     # Changing one without the other points the camera at the wrong bearing.
     gimbal_mode: "follow"
+    # One send of the wide zoom when the driver starts, so the camera never
+    # begins a run at whatever the last one left it in (observed booting at
+    # 20x). A range POSITION, not a magnification: 0.0 is true 1x, while 1.0
+    # is already 1.2116x. The driver waits for the first EO zoom telemetry
+    # before sending, because a camera command issued before the payload's
+    # camera subsystem is up is dropped silently. Remove the key to disable.
+    boot_zoom_range: 0.0

@@ -1,4 +1,5 @@
 #include "payloadSdkInterface.h"
+#include "gremsy_attitude_validity.h"
 
 #define SDK_VERSION "3.0.0_build.04022025"
 
@@ -1699,30 +1700,66 @@ _handle_msg_camera_settings(mavlink_message_t* msg){
     }
 }
 
+// The numeric ids in gremsy_attitude_validity.h must be MAVLink's. That header
+// stays include-free so it can be unit tested; these pin it to the real enum.
+static_assert(MAV_COMP_ID_GIMBAL  == 154, "MAV_COMP_ID_GIMBAL moved");
+static_assert(MAV_COMP_ID_GIMBAL2 == 171, "MAV_COMP_ID_GIMBAL2 moved");
+static_assert(MAV_COMP_ID_GIMBAL6 == 175, "MAV_COMP_ID_GIMBAL6 moved");
+
+// Rejection tallies for the attitude gate. Written only from the MAVLink read
+// thread, so plain counters are enough. They exist to answer a specific
+// question with evidence instead of argument: if zero_triple stays at 0 across
+// real flights while sender climbs, then filtering by component id is
+// sufficient on this airframe and the explicit triple check can be retired.
+// If it climbs too, a zeroed field set is reaching us from inside the gimbal
+// component range and the triple check is the only thing catching it.
+static unsigned long __att_accept = 0, __att_rej_sender = 0,
+                     __att_rej_nonfinite = 0, __att_rej_zero = 0;
+
 void
 PayloadSdkInterface::
 _handle_msg_mount_orientation(mavlink_message_t* msg){
-    // Several components share this link (camera, payload, gimbal) and more
-    // than one emits MOUNT_ORIENTATION; only the gimbal's stream carries the
-    // real attitude — others send zeroed fields. Accept the gimbal's only.
-    if(msg->compid != MAV_COMP_ID_GIMBAL
-        && msg->compid != MAV_COMP_ID_GIMBAL2
-        && msg->compid != MAV_COMP_ID_GIMBAL3
-        && msg->compid != MAV_COMP_ID_GIMBAL4
-        && msg->compid != MAV_COMP_ID_GIMBAL5
-        && msg->compid != MAV_COMP_ID_GIMBAL6){
-        return;
-    }
-
     mavlink_mount_orientation_t packet;
     mavlink_msg_mount_orientation_decode(msg, &packet);
 
-    if(__notifyPayloadStatusChanged != NULL){
-        double pitch_ = packet.pitch;
-        double roll_ = packet.roll;
-        double yaw_ = (current_gimbal_mode == PAYLOAD_CAMERA_GIMBAL_MODE_LOCK) ? packet.yaw_absolute : packet.yaw;
+    // Which yaw is the published one depends on the gimbal mode, so resolve it
+    // BEFORE validating -- otherwise the check reads a field we never publish
+    // and a zeroed set slips through on the other one.
+    const bool lock_mode = (current_gimbal_mode == PAYLOAD_CAMERA_GIMBAL_MODE_LOCK);
+    const float yaw_used = lock_mode ? packet.yaw_absolute : packet.yaw;
 
-        double params[3] = {pitch_, roll_, yaw_};
+    const gremsy::AttitudeVerdict verdict =
+        gremsy::classify_attitude(msg->compid, packet.roll, packet.pitch, yaw_used);
+
+    if(verdict != gremsy::AttitudeVerdict::Accept){
+        unsigned long* tally =
+            (verdict == gremsy::AttitudeVerdict::RejectSender)    ? &__att_rej_sender :
+            (verdict == gremsy::AttitudeVerdict::RejectNotFinite) ? &__att_rej_nonfinite :
+                                                                    &__att_rej_zero;
+        // Loud once per cause, then rare: the first one tells you a new sender
+        // or a new failure appeared, and the periodic line keeps the rate
+        // visible without drowning the log at the stream rate.
+        if(++(*tally) == 1 || (*tally) % 500 == 0){
+            printf("[gremsy attitude] dropped %s from compid %u "
+                   "(roll=%.6f pitch=%.6f yaw=%.6f); totals: sender=%lu nan=%lu zero=%lu accepted=%lu\n",
+                   gremsy::to_string(verdict), (unsigned)msg->compid,
+                   packet.roll, packet.pitch, yaw_used,
+                   __att_rej_sender, __att_rej_nonfinite, __att_rej_zero, __att_accept);
+            fflush(stdout);
+        }
+        return;
+    }
+
+    // First accepted sample names the component that actually carries the
+    // attitude -- the one fact needed to confirm the whitelist is right.
+    if(++__att_accept == 1){
+        printf("[gremsy attitude] accepting MOUNT_ORIENTATION from compid %u\n",
+               (unsigned)msg->compid);
+        fflush(stdout);
+    }
+
+    if(__notifyPayloadStatusChanged != NULL){
+        double params[3] = {(double)packet.pitch, (double)packet.roll, (double)yaw_used};
         __notifyPayloadStatusChanged(PAYLOAD_GB_ATTITUDE, params);
     }
 }

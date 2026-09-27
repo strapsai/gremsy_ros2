@@ -94,6 +94,8 @@ target_link_libraries(spirit_driver
 
 install(TARGETS spirit_driver DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+# Drone-less test double for the ground UI (see scripts/mock_spirit_driver.py).
+install(PROGRAMS scripts/mock_spirit_driver.py DESTINATION lib/${PROJECT_NAME})
 
 # --------------------------------------------------------------------------
 # GUI executables (only when GTKmm is available)
