@@ -526,6 +526,12 @@ private:
       RCLCPP_INFO(this->get_logger(), "gimbal mode set to %d by operator", m.data);
     }));
 
+    // Gyro calibration: keep the aircraft still, then power-cycle the payload.
+    subs_.push_back(sub<Empty>(CMD_GIMBAL_CALIB_GYRO, [this](const Empty&){
+      my_payload->sendPayloadGimbalCalibGyro();
+      RCLCPP_WARN(this->get_logger(), "gimbal gyro calibration requested; keep the aircraft still");
+    }));
+
     // Misc
     subs_.push_back(sub<Empty>(CMD_QUERY_PARAMS, [](const Empty&){
       my_payload->getPayloadCameraInformation();
