@@ -52,6 +52,7 @@ constexpr const char* CMD_GIMBAL_PAN           = "cmd/gimbal_pan";            //
 constexpr const char* CMD_GIMBAL_RATE          = "cmd/gimbal_rate";           // geometry_msgs/Vector3 (pitch,roll,yaw deg/s) -- all axes at once
 constexpr const char* CMD_GIMBAL_ANGLE         = "cmd/gimbal_angle";          // geometry_msgs/Vector3 (pitch,roll,yaw deg)
 constexpr const char* CMD_GIMBAL_MODE          = "cmd/gimbal_mode";           // std_msgs/Int32
+constexpr const char* CMD_GIMBAL_CALIB_GYRO    = "cmd/gimbal_calib_gyro";     // std_msgs/Empty
 // Misc / generic full-API passthrough
 constexpr const char* CMD_QUERY_PARAMS         = "cmd/query_params";          // std_msgs/Empty
 constexpr const char* CMD_SET_CAMERA_PARAM     = "cmd/set_camera_param";      // std_msgs/String "PARAM_ID VALUE [int32|uint32]"
